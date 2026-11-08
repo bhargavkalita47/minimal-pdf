@@ -7,6 +7,10 @@ A minimal offline Android PDF reader and page organizer for personal use. No acc
 - Automatically match the phone's light/dark theme, including when system appearance changes
 - Clean, compact reader interface with an improved empty state and organized page actions
 - Open PDF files using Android's document picker or another app's **Open with** action
+- Tap a PDF page to hide or reveal the app controls (distraction-free reading)
+- Double-tap a page to open a focused overlay; double-tap again or press × to return
+- Zoom with two fingers or choose 100%, 125%, 150%, 200%, 300%, or 400% in the zoom menu
+- Borderless, simplified page and document controls
 - Scroll vertically through the entire PDF continuously, with pages rendered lazily for memory efficiency
 - Pinch to zoom (and pan horizontally when zoomed in), or jump using **Pages**
 - **Move to…** reposition the current page anywhere in the PDF
