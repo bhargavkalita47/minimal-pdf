@@ -1,0 +1,14 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.personal.minimalpdf'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.personal.minimalpdf'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+}
