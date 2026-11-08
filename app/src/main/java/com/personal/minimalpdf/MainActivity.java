@@ -499,7 +499,7 @@ public class MainActivity extends Activity {
             .setSingleChoiceItems(labels, selected, (dialog, index) -> {
                 float level = ZOOM_LEVELS[index] / 100f;
                 if (focused) {
-                    if (focusPage != null) focusPage.setZoom(level);
+                    if (focusPage != null) focusPage.animateToZoom(level);
                 } else {
                     pdfPages.setZoom(level);
                 }
@@ -511,7 +511,7 @@ public class MainActivity extends Activity {
 
     private void showFocus(int position) {
         if (!ready() || position < 0 || position >= pageOrder.size()) return;
-        closeFocus();
+        closeFocus(false);
         final int originalPage = pageOrder.get(position);
         final int request = ++focusGeneration;
         final Uri source = sourceUri;
@@ -542,24 +542,30 @@ public class MainActivity extends Activity {
         LinearLayout bar = new LinearLayout(this);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setPadding(dp(12), dp(6), dp(12), dp(6));
-        bar.setBackgroundColor(colors.surface);
+        bar.setBackgroundColor(barBackground);
         focusToolbar = bar;
         focusOverlay.addView(bar, new FrameLayout.LayoutParams(-1, dp(58), Gravity.TOP));
 
-        Button close = button("×", v -> closeFocus());
-        close.setTextSize(25);
-        close.setContentDescription("Close focused page");
-        addButton(bar, close);
+        ReaderIcon close = iconButton(ReaderIcon.CLOSE, "Close focused page",
+            view -> closeFocus());
+        bar.addView(close, new LinearLayout.LayoutParams(dp(48), dp(46)));
 
         TextView title = text("Page " + (position + 1) + " of " + pageOrder.size(),
-            15, colors.foreground, true);
+            15, barForeground, true);
         bar.addView(title, new LinearLayout.LayoutParams(0, -1, 1));
 
         focusZoomButton = button("100% ▾", v -> chooseZoom(true));
+        focusZoomButton.setTextColor(barForeground);
+        focusZoomButton.setBackground(colors.rounded(this, Color.TRANSPARENT,
+            Color.TRANSPARENT, 9));
         focusZoomButton.setContentDescription("Focused zoom level");
         bar.addView(focusZoomButton, new LinearLayout.LayoutParams(-2, dp(42)));
 
+        focusOverlay.setAlpha(0f);
         host.addView(focusOverlay, new FrameLayout.LayoutParams(-1, -1));
+        focusOverlay.animate().alpha(1f).setDuration(170)
+            .setInterpolator(new android.view.animation.DecelerateInterpolator(1.4f))
+            .start();
         background.execute(() -> {
             Bitmap rendered = null;
             String error = null;
@@ -591,7 +597,9 @@ public class MainActivity extends Activity {
                 if (result != null) {
                     if (focusLoading != null) focusLoading.setVisibility(View.GONE);
                     focusPage.setBitmap(result);
-                    focusPage.setZoom(1.5f);
+                    focusPage.setAlpha(0f);
+                    focusPage.animate().alpha(1f).setDuration(160).start();
+                    focusPage.animateToZoom(1.5f);
                 } else {
                     toast("Unable to focus page: " + message);
                     closeFocus();
@@ -600,17 +608,28 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void closeFocus() {
+    private void closeFocus() { closeFocus(true); }
+
+    private void closeFocus(boolean animate) {
         focusGeneration++;
-        if (focusPage != null) focusPage.dispose();
+        final FrameLayout overlay = focusOverlay;
+        final FocusPageView page = focusPage;
+        focusOverlay = null;
         focusPage = null;
         focusZoomButton = null;
         focusToolbar = null;
         focusLoading = null;
-        if (focusOverlay != null) {
-            if (host != null) host.removeView(focusOverlay);
-            focusOverlay = null;
-        }
+        if (overlay == null) return;
+        overlay.animate().cancel();
+        Runnable clean = () -> {
+            if (host != null && overlay.getParent() == host) host.removeView(overlay);
+            if (page != null) page.dispose();
+        };
+        if (animate) {
+            overlay.animate().alpha(0f).setDuration(145)
+                .setInterpolator(new android.view.animation.AccelerateInterpolator(1.2f))
+                .withEndAction(clean).start();
+        } else clean.run();
     }
 
     @Override public void onBackPressed() {
@@ -716,7 +735,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeDocument() {
-        closeFocus();
+        closeFocus(false);
         if (pdfPages != null) pdfPages.clearDocument();
         if (emptyView != null) emptyView.setVisibility(View.VISIBLE);
         if (renderer != null) { try { renderer.close(); } catch (Exception ignored) { } renderer = null; }
