@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main, dev/polished-adaptive-ui]
+    branches: [main, dev/gesture-focus-view]
   workflow_dispatch:
 
 jobs:
