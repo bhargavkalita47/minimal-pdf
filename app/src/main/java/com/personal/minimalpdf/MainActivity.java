@@ -64,6 +64,7 @@ public class MainActivity extends Activity {
     private FocusPageView focusPage;
     private Button focusZoomButton;
     private View focusToolbar;
+    private TextView focusLoading;
     private int focusGeneration = 0;
     private static final int[] ZOOM_LEVELS = {100, 125, 150, 200, 300, 400};
     private View emptyView;
@@ -86,10 +87,6 @@ public class MainActivity extends Activity {
         String savedUri = state == null ? null : state.getString("open_uri");
         Uri incoming = savedUri == null
             ? (getIntent() == null ? null : getIntent().getData()) : Uri.parse(savedUri);
-        if (state != null) {
-            chromeVisible = state.getBoolean("chrome_visible", true);
-            applyChrome();
-        }
         if (incoming != null) {
             openDocument(incoming);
             if (renderer != null && state != null && savedUri != null) {
@@ -102,6 +99,10 @@ public class MainActivity extends Activity {
                     refreshUI();
                 }
             }
+        }
+        if (state != null) {
+            chromeVisible = state.getBoolean("chrome_visible", true);
+            applyChrome();
         }
     }
 
@@ -400,7 +401,9 @@ public class MainActivity extends Activity {
         final int request = ++focusGeneration;
         final Uri source = sourceUri;
         focusOverlay = new FrameLayout(this);
-        focusOverlay.setBackgroundColor(colors.canvas);
+        // A dimmed scrim leaves the document visible beneath the lifted page.
+        focusOverlay.setBackgroundColor(Color.argb(
+            colors.dark ? 225 : 190, 14, 18, 25));
         focusPage = new FocusPageView(this, new FocusPageView.Actions() {
             @Override public void onDoubleTap() { closeFocus(); }
             @Override public void onSingleTap() {
@@ -415,6 +418,11 @@ public class MainActivity extends Activity {
             }
         });
         focusOverlay.addView(focusPage, new FrameLayout.LayoutParams(-1, -1));
+
+        focusLoading = text("Loading page…", 14, Color.WHITE, false);
+        focusLoading.setGravity(Gravity.CENTER);
+        focusOverlay.addView(focusLoading,
+            new FrameLayout.LayoutParams(-1, dp(50), Gravity.CENTER));
 
         LinearLayout bar = new LinearLayout(this);
         bar.setGravity(Gravity.CENTER_VERTICAL);
@@ -466,6 +474,7 @@ public class MainActivity extends Activity {
                     return;
                 }
                 if (result != null) {
+                    if (focusLoading != null) focusLoading.setVisibility(View.GONE);
                     focusPage.setBitmap(result);
                     focusPage.setZoom(1.5f);
                 } else {
@@ -482,6 +491,7 @@ public class MainActivity extends Activity {
         focusPage = null;
         focusZoomButton = null;
         focusToolbar = null;
+        focusLoading = null;
         if (focusOverlay != null) {
             if (host != null) host.removeView(focusOverlay);
             focusOverlay = null;
