@@ -55,7 +55,8 @@ public class MainActivity extends Activity {
     private final ArrayList<Integer> pageOrder = new ArrayList<>();
     private int pageIndex = 0;
     private String documentName = "document.pdf";
-    private PdfCanvas pdfCanvas;
+    private PdfPageList pdfPages;
+    private TextView emptyView;
     private TextView fileLabel;
     private TextView pageLabel;
     private Button saveButton;
@@ -154,20 +155,25 @@ public class MainActivity extends Activity {
         FrameLayout content = new FrameLayout(this);
         content.setBackgroundColor(Color.rgb(228, 230, 234));
         root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
-        pdfCanvas = new PdfCanvas(this, new PdfCanvas.Actions() {
-            @Override public ArrayList<PdfCanvas.Mark> currentMarks() { return new ArrayList<>(); }
-            @Override public void addMark(PdfCanvas.Mark mark) { }
-            @Override public void onTextTap(float x, float y) { }
+        HorizontalScrollView pan = new HorizontalScrollView(this);
+        pan.setFillViewport(true);
+        pan.setHorizontalScrollBarEnabled(false);
+        pan.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        pdfPages = new PdfPageList(this, pan, position -> {
+            if (renderer != null && pageIndex != position) {
+                pageIndex = position;
+                refreshUI();
+            }
         });
-        pdfCanvas.setTool(PdfCanvas.Tool.VIEW);
-        content.addView(pdfCanvas, new FrameLayout.LayoutParams(-1, -1));
-        TextView empty = new TextView(this);
-        empty.setText("Open a PDF to begin");
-        empty.setTextColor(Color.DKGRAY);
-        empty.setTextSize(17);
-        empty.setGravity(Gravity.CENTER);
-        content.addView(empty, new FrameLayout.LayoutParams(-1, -1));
-        pdfCanvas.setEmptyLabel(empty);
+        pan.addView(pdfPages, new HorizontalScrollView.LayoutParams(-1, -1));
+        content.addView(pan, new FrameLayout.LayoutParams(-1, -1));
+
+        emptyView = new TextView(this);
+        emptyView.setText("Open a PDF to begin");
+        emptyView.setTextColor(Color.DKGRAY);
+        emptyView.setTextSize(17);
+        emptyView.setGravity(Gravity.CENTER);
+        content.addView(emptyView, new FrameLayout.LayoutParams(-1, -1));
 
         HorizontalScrollView scroll = new HorizontalScrollView(this);
         scroll.setHorizontalScrollBarEnabled(false);
@@ -267,38 +273,19 @@ public class MainActivity extends Activity {
             pageOrder.clear();
             for (int index = 0; index < renderer.getPageCount(); index++) pageOrder.add(index);
             pageIndex = 0;
-            renderCurrentPage();
+            pdfPages.setDocument(renderer, pageOrder);
+            emptyView.setVisibility(View.GONE);
+            refreshUI();
         } catch (Exception error) {
             toast("Could not open PDF: " + error.getMessage());
         }
     }
 
     private void closeDocument() {
-        if (pdfCanvas != null) pdfCanvas.setPage(null);
+        if (pdfPages != null) pdfPages.clearDocument();
+        if (emptyView != null) emptyView.setVisibility(View.VISIBLE);
         if (renderer != null) { try { renderer.close(); } catch (Exception ignored) { } renderer = null; }
         if (sourceFd != null) { try { sourceFd.close(); } catch (Exception ignored) { } sourceFd = null; }
-    }
-
-    private void renderCurrentPage() {
-        if (renderer == null || pageOrder.isEmpty()) return;
-        try (PdfRenderer.Page page = renderer.openPage(pageOrder.get(pageIndex))) {
-            int width = page.getWidth(), height = page.getHeight();
-            float scale = Math.min(3f, 2400f / Math.max(width, height));
-            Bitmap bitmap = Bitmap.createBitmap(
-                Math.max(1, Math.round(width * scale)),
-                Math.max(1, Math.round(height * scale)), Bitmap.Config.ARGB_8888);
-            bitmap.eraseColor(Color.WHITE);
-            try {
-                page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
-                pdfCanvas.setPage(bitmap);
-            } catch (Exception error) {
-                bitmap.recycle();
-                throw error;
-            }
-            refreshUI();
-        } catch (Exception error) {
-            toast("Could not display page: " + error.getMessage());
-        }
     }
 
     private void navigate(int distance) {
@@ -306,7 +293,8 @@ public class MainActivity extends Activity {
         int target = pageIndex + distance;
         if (target < 0 || target >= pageOrder.size()) return;
         pageIndex = target;
-        renderCurrentPage();
+        pdfPages.scrollToPage(pageIndex);
+        refreshUI();
     }
 
     private void showPages() {
@@ -319,7 +307,8 @@ public class MainActivity extends Activity {
             .setSingleChoiceItems(labels, pageIndex, (dialog, which) -> {
                 pageIndex = which;
                 dialog.dismiss();
-                renderCurrentPage();
+                pdfPages.scrollToPage(pageIndex);
+                refreshUI();
             })
             .setNegativeButton("Close", null)
             .show();
@@ -364,7 +353,8 @@ public class MainActivity extends Activity {
                 Integer original = pageOrder.remove(pageIndex);
                 pageOrder.add(target, original);
                 pageIndex = target;
-                renderCurrentPage();
+                pdfPages.pagesChanged(pageIndex);
+                refreshUI();
             })
             .setNegativeButton("Cancel", null)
             .show();
@@ -378,7 +368,8 @@ public class MainActivity extends Activity {
             .setPositiveButton("Remove", (dialog, which) -> {
                 pageOrder.remove(pageIndex);
                 pageIndex = Math.min(pageIndex, pageOrder.size() - 1);
-                renderCurrentPage();
+                pdfPages.pagesChanged(pageIndex);
+                refreshUI();
             })
             .setNegativeButton("Cancel", null)
             .show();
@@ -392,7 +383,8 @@ public class MainActivity extends Activity {
                 pageOrder.clear();
                 for (int i = 0; i < renderer.getPageCount(); i++) pageOrder.add(i);
                 pageIndex = 0;
-                renderCurrentPage();
+                pdfPages.pagesChanged(pageIndex);
+                refreshUI();
             })
             .setNegativeButton("Cancel", null)
             .show();
@@ -555,11 +547,12 @@ public class MainActivity extends Activity {
 
     @Override public void onConfigurationChanged(Configuration config) {
         super.onConfigurationChanged(config);
-        if (pdfCanvas != null) pdfCanvas.resetTransform();
+        if (pdfPages != null) pdfPages.resetZoom();
     }
 
     @Override protected void onDestroy() {
         closeDocument();
+        if (pdfPages != null) pdfPages.dispose();
         background.shutdown();
         super.onDestroy();
     }
