@@ -46,7 +46,7 @@ public class MainActivity extends Activity {
     private static final int OPEN_FILE = 101;
     private static final int SAVE_FILE = 102;
     private UiPalette colors;
-    private final ArrayList<Button> documentButtons = new ArrayList<>();
+    private final ArrayList<View> documentButtons = new ArrayList<>();
 
     private Uri sourceUri;
     private ParcelFileDescriptor sourceFd;
@@ -70,9 +70,12 @@ public class MainActivity extends Activity {
     private View emptyView;
     private TextView fileLabel;
     private TextView pageLabel;
-    private Button saveButton;
-    private Button shareButton;
-    private Button openButton;
+    private ReaderIcon saveButton;
+    private ReaderIcon shareButton;
+    private ReaderIcon openButton;
+    private TextView pageBadge;
+    private Runnable badgeFade;
+    private int barBackground, barForeground, barMuted;
     private boolean busy = false;
 
     private ArrayList<Integer> pendingSavePages;
@@ -81,6 +84,9 @@ public class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         colors = UiPalette.from(this);
+        barBackground = colors.dark ? Color.rgb(14, 15, 18) : Color.rgb(28, 29, 33);
+        barForeground = Color.rgb(245, 247, 250);
+        barMuted = Color.rgb(169, 174, 183);
         styleSystemBars();
         PDFBoxResourceLoader.init(getApplicationContext());
         buildInterface();
@@ -117,14 +123,12 @@ public class MainActivity extends Activity {
     }
 
     private void styleSystemBars() {
-        getWindow().setStatusBarColor(colors.surface);
-        getWindow().setNavigationBarColor(colors.surface);
+        getWindow().setStatusBarColor(barBackground);
+        getWindow().setNavigationBarColor(barBackground);
         if (android.os.Build.VERSION.SDK_INT >= 29) {
             getWindow().setNavigationBarContrastEnforced(false);
         }
-        int flags = colors.dark ? 0 :
-            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
-        getWindow().getDecorView().setSystemUiVisibility(flags);
+        getWindow().getDecorView().setSystemUiVisibility(0);
     }
 
     private TextView text(String value, int size, int color, boolean medium) {
@@ -179,55 +183,18 @@ public class MainActivity extends Activity {
         row.addView(item, params);
     }
 
+    private ReaderIcon iconButton(String icon, String label, View.OnClickListener action) {
+        return new ReaderIcon(this, icon, barForeground, label, action);
+    }
+
     private void buildInterface() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(colors.surface);
         host = new FrameLayout(this);
-        host.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        host.setBackgroundColor(colors.canvas);
         setContentView(host);
-
-        // File title stays readable; Share and Save remain at the top.
-        LinearLayout header = new LinearLayout(this);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(dp(16), dp(9), dp(9), dp(9));
-        root.addView(header, new LinearLayout.LayoutParams(-1, dp(73)));
-        headerView = header;
-
-        LinearLayout identity = new LinearLayout(this);
-        identity.setOrientation(LinearLayout.VERTICAL);
-        identity.setGravity(Gravity.CENTER_VERTICAL);
-        header.addView(identity, new LinearLayout.LayoutParams(0, -1, 1));
-
-        TextView appTitle = text("PDF", 18, colors.foreground, true);
-        identity.addView(appTitle, new LinearLayout.LayoutParams(-1, dp(27)));
-
-        fileLabel = text("No document selected", 11, colors.mutedText, false);
-        fileLabel.setSingleLine(true);
-        fileLabel.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-        identity.addView(fileLabel, new LinearLayout.LayoutParams(-1, dp(19)));
-
-        openButton = button("Open", v -> chooseDocument());
-        quiet(openButton);
-        addButton(header, openButton);
-
-        shareButton = button("Share", v -> sharePages(new ArrayList<>(pageOrder)));
-        quiet(shareButton);
-        addButton(header, shareButton);
-
-        saveButton = button("Save", v -> chooseSaveDestination(
-            new ArrayList<>(pageOrder), "-edited"));
-        primary(saveButton);
-        header.addView(saveButton, new LinearLayout.LayoutParams(-2, dp(40)));
-
-        View dividerTop = new View(this);
-        dividerTop.setBackgroundColor(colors.stroke);
-        root.addView(dividerTop, new LinearLayout.LayoutParams(-1, dp(1)));
-        topDivider = dividerTop;
 
         FrameLayout content = new FrameLayout(this);
         content.setBackgroundColor(colors.canvas);
-        root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
+        host.addView(content, new FrameLayout.LayoutParams(-1, -1));
 
         ZoomScrollView pan = new ZoomScrollView(this);
         pdfPages = new PdfPageList(this, pan, new PdfPageList.PageListener() {
@@ -235,6 +202,7 @@ public class MainActivity extends Activity {
                 if (renderer != null && pageIndex != position) {
                     pageIndex = position;
                     refreshUI();
+                    showPageBadge();
                 }
             }
             @Override public void onSingleTap() { toggleChrome(); }
@@ -247,113 +215,260 @@ public class MainActivity extends Activity {
         pan.addView(pdfPages, new HorizontalScrollView.LayoutParams(-1, -1));
         content.addView(pan, new FrameLayout.LayoutParams(-1, -1));
 
+        // A quiet empty state, consistent with the reader's dark toolbar.
         LinearLayout empty = new LinearLayout(this);
         empty.setOrientation(LinearLayout.VERTICAL);
         empty.setGravity(Gravity.CENTER);
-        empty.setPadding(dp(20), dp(30), dp(20), dp(30));
+        empty.setPadding(dp(24), dp(24), dp(24), dp(24));
         empty.setBackgroundColor(colors.canvas);
-
-        TextView icon = text("PDF", 14, colors.accent, true);
-        icon.setGravity(Gravity.CENTER);
-        icon.setLetterSpacing(.04f);
-        icon.setBackground(colors.rounded(this, colors.subtle, colors.stroke, 17));
-        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(70), dp(70));
-        iconParams.bottomMargin = dp(21);
-        empty.addView(icon, iconParams);
-
-        TextView message = text("Open a PDF", 19, colors.foreground, true);
-        message.setGravity(Gravity.CENTER);
-        empty.addView(message, new LinearLayout.LayoutParams(-1, dp(32)));
-
-        TextView hint = text("Read, arrange, extract and share pages.\nEverything stays on your device.",
+        TextView emblem = text("PDF", 17, colors.accent, true);
+        emblem.setGravity(Gravity.CENTER);
+        emblem.setBackground(colors.rounded(this, colors.subtle, Color.TRANSPARENT, 18));
+        LinearLayout.LayoutParams emblemParams = new LinearLayout.LayoutParams(dp(76), dp(76));
+        emblemParams.bottomMargin = dp(18);
+        empty.addView(emblem, emblemParams);
+        TextView title = text("Your documents, simplified", 19, colors.foreground, true);
+        title.setGravity(Gravity.CENTER);
+        empty.addView(title, new LinearLayout.LayoutParams(-1, dp(35)));
+        TextView description = text("Open a PDF to read, organize, extract and share.",
             13, colors.mutedText, false);
-        hint.setGravity(Gravity.CENTER);
-        hint.setTextAlignment(View.TEXT_ALIGNMENT_CENTER);
-        hint.setLineSpacing(dp(3), 1f);
-        LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
-        hintParams.topMargin = dp(7);
-        hintParams.bottomMargin = dp(20);
-        empty.addView(hint, hintParams);
-
-        Button openEmpty = button("Choose a document", v -> chooseDocument());
+        description.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams descParams = new LinearLayout.LayoutParams(-1, dp(48));
+        descParams.bottomMargin = dp(16);
+        empty.addView(description, descParams);
+        Button openEmpty = button("Open a PDF", view -> chooseDocument());
         primary(openEmpty);
-        empty.addView(openEmpty, new LinearLayout.LayoutParams(-2, dp(46)));
+        empty.addView(openEmpty, new LinearLayout.LayoutParams(-2, dp(47)));
         emptyView = empty;
-        content.addView(emptyView, new FrameLayout.LayoutParams(-1, -1));
+        content.addView(empty, new FrameLayout.LayoutParams(-1, -1));
 
-        View dividerBottom = new View(this);
-        dividerBottom.setBackgroundColor(colors.stroke);
-        root.addView(dividerBottom, new LinearLayout.LayoutParams(-1, dp(1)));
-        bottomDivider = dividerBottom;
+        pageBadge = text("1", 16, barForeground, true);
+        pageBadge.setGravity(Gravity.CENTER);
+        pageBadge.setBackground(colors.rounded(this, barBackground, Color.TRANSPARENT, 24));
+        pageBadge.setAlpha(0f);
+        pageBadge.setVisibility(View.GONE);
+        pageBadge.setOnClickListener(view -> showPages());
+        FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
+            dp(51), dp(54), Gravity.END | Gravity.CENTER_VERTICAL);
+        badgeParams.rightMargin = -dp(10);
+        host.addView(pageBadge, badgeParams);
+
+        // Fixed overlays: hiding controls never resizes the document viewport.
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(4), 0, dp(4), 0);
+        header.setBackgroundColor(barBackground);
+        headerView = header;
+        host.addView(header, new FrameLayout.LayoutParams(-1, dp(59), Gravity.TOP));
+
+        ReaderIcon back = iconButton(ReaderIcon.BACK, "Back", view -> {
+            if (renderer != null) {
+                closeDocument();
+                pageOrder.clear();
+                sourceUri = null;
+                refreshUI();
+            } else finish();
+        });
+        header.addView(back, new LinearLayout.LayoutParams(dp(47), dp(49)));
+
+        View hairline = new View(this);
+        hairline.setBackgroundColor(Color.rgb(74, 77, 85));
+        LinearLayout.LayoutParams hairlineParams = new LinearLayout.LayoutParams(dp(1), dp(26));
+        hairlineParams.rightMargin = dp(9);
+        header.addView(hairline, hairlineParams);
+
+        LinearLayout meta = new LinearLayout(this);
+        meta.setOrientation(LinearLayout.VERTICAL);
+        meta.setGravity(Gravity.CENTER_VERTICAL);
+        header.addView(meta, new LinearLayout.LayoutParams(0, -1, 1));
+        fileLabel = text("PDF", 14, barForeground, true);
+        fileLabel.setSingleLine(true);
+        fileLabel.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        meta.addView(fileLabel, new LinearLayout.LayoutParams(-1, dp(23)));
+        pageLabel = text("Open a document", 11, barMuted, false);
+        pageLabel.setSingleLine(true);
+        pageLabel.setOnClickListener(view -> showPages());
+        meta.addView(pageLabel, new LinearLayout.LayoutParams(-1, dp(19)));
+
+        openButton = iconButton(ReaderIcon.OPEN, "Open PDF", view -> chooseDocument());
+        header.addView(openButton, new LinearLayout.LayoutParams(dp(43), dp(48)));
+        shareButton = iconButton(ReaderIcon.SHARE, "Share PDF",
+            view -> sharePages(new ArrayList<>(pageOrder)));
+        header.addView(shareButton, new LinearLayout.LayoutParams(dp(43), dp(48)));
+        ReaderIcon more = iconButton(ReaderIcon.MORE, "More actions", this::showReaderMenu);
+        header.addView(more, new LinearLayout.LayoutParams(dp(43), dp(48)));
 
         LinearLayout footer = new LinearLayout(this);
         footer.setOrientation(LinearLayout.VERTICAL);
-        footer.setBackgroundColor(colors.surface);
-        root.addView(footer, new LinearLayout.LayoutParams(-1, -2));
+        footer.setBackgroundColor(barBackground);
         footerView = footer;
+        host.addView(footer, new FrameLayout.LayoutParams(-1, dp(112), Gravity.BOTTOM));
 
-        LinearLayout navigation = new LinearLayout(this);
-        navigation.setGravity(Gravity.CENTER_VERTICAL);
-        navigation.setPadding(dp(16), dp(9), dp(9), dp(6));
-        footer.addView(navigation, new LinearLayout.LayoutParams(-1, dp(55)));
+        LinearLayout paging = new LinearLayout(this);
+        paging.setGravity(Gravity.CENTER_VERTICAL);
+        paging.setPadding(dp(12), dp(1), dp(12), 0);
+        footer.addView(paging, new LinearLayout.LayoutParams(-1, dp(43)));
+        ReaderIcon previous = iconButton(ReaderIcon.PREVIOUS, "Previous page",
+            view -> navigate(-1));
+        documentButtons.add(previous);
+        paging.addView(previous, new LinearLayout.LayoutParams(dp(42), dp(40)));
 
-        LinearLayout pageInfo = new LinearLayout(this);
-        pageInfo.setGravity(Gravity.CENTER_VERTICAL);
-        pageInfo.setOrientation(LinearLayout.VERTICAL);
-        navigation.addView(pageInfo, new LinearLayout.LayoutParams(0, -1, 1));
+        TextView current = text("1 / 1", 12, barMuted, true);
+        current.setGravity(Gravity.CENTER);
+        current.setOnClickListener(view -> showPages());
+        // Keep a secondary display of page position alongside the fixed badge.
+        paging.addView(current, new LinearLayout.LayoutParams(dp(69), dp(40)));
+        current.setTag("page-counter");
 
-        TextView pageCaption = text("DOCUMENT", 10, colors.mutedText, true);
-        pageCaption.setLetterSpacing(.1f);
-        pageInfo.addView(pageCaption, new LinearLayout.LayoutParams(-1, dp(17)));
+        ReaderIcon next = iconButton(ReaderIcon.NEXT, "Next page",
+            view -> navigate(1));
+        documentButtons.add(next);
+        paging.addView(next, new LinearLayout.LayoutParams(dp(42), dp(40)));
 
-        pageLabel = text("Page — of —", 14, colors.foreground, true);
-        pageLabel.setOnClickListener(v -> showPages());
-        pageLabel.setContentDescription("Choose a page");
-        pageInfo.addView(pageLabel, new LinearLayout.LayoutParams(-1, dp(25)));
+        View space = new View(this);
+        paging.addView(space, new LinearLayout.LayoutParams(0, 1, 1));
 
-        zoomButton = documentButton("100% ▾", v -> chooseZoom(false));
-        zoomButton.setContentDescription("Zoom level");
-        quiet(zoomButton);
-        addButton(navigation, zoomButton);
+        zoomButton = button("100% ▾", view -> chooseZoom(false));
+        zoomButton.setTextColor(barForeground);
+        zoomButton.setTextSize(13);
+        zoomButton.setBackground(colors.rounded(this, Color.TRANSPARENT,
+            Color.TRANSPARENT, 8));
+        documentButtons.add(zoomButton);
+        paging.addView(zoomButton, new LinearLayout.LayoutParams(dp(85), dp(40)));
 
-        Button previous = documentButton("‹", v -> navigate(-1));
-        previous.setTextSize(25);
-        quiet(previous);
-        addButton(navigation, previous);
-
-        Button next = documentButton("›", v -> navigate(1));
-        next.setTextSize(25);
-        quiet(next);
-        navigation.addView(next, new LinearLayout.LayoutParams(-2, dp(40)));
-
-        HorizontalScrollView toolbarScroll = new HorizontalScrollView(this);
-        toolbarScroll.setHorizontalScrollBarEnabled(false);
-        footer.addView(toolbarScroll, new LinearLayout.LayoutParams(-1, dp(57)));
+        View rule = new View(this);
+        rule.setBackgroundColor(Color.rgb(62, 64, 69));
+        LinearLayout.LayoutParams ruleParams = new LinearLayout.LayoutParams(-1, dp(1));
+        ruleParams.leftMargin = dp(14);
+        ruleParams.rightMargin = dp(14);
+        footer.addView(rule, ruleParams);
 
         LinearLayout actions = new LinearLayout(this);
-        actions.setGravity(Gravity.CENTER_VERTICAL);
-        actions.setPadding(dp(16), 0, dp(9), dp(14));
-        toolbarScroll.addView(actions, new HorizontalScrollView.LayoutParams(-2, -1));
+        actions.setGravity(Gravity.CENTER);
+        actions.setPadding(dp(4), dp(1), dp(4), dp(3));
+        footer.addView(actions, new LinearLayout.LayoutParams(-1, dp(67)));
+        addAction(actions, ReaderIcon.PAGES, "Pages", view -> showPages());
+        addAction(actions, ReaderIcon.MOVE, "Move", view -> movePage());
+        addAction(actions, ReaderIcon.EXTRACT, "Extract", view -> extractPages());
+        addAction(actions, ReaderIcon.DELETE, "Remove", view -> removeCurrentPage());
+        saveButton = addAction(actions, ReaderIcon.SAVE, "Save", view ->
+            chooseSaveDestination(new ArrayList<>(pageOrder), "-edited"));
 
-        addButton(actions, documentButton("Pages", v -> showPages()));
-        addButton(actions, documentButton("Move", v -> movePage()));
-        addButton(actions, documentButton("Extract", v -> extractPages()));
-
-        Button remove = documentButton("Remove", v -> removeCurrentPage());
-        remove.setTextColor(colors.error);
-        addButton(actions, remove);
-
-        Button reset = documentButton("Reset", v -> resetPages());
-        addButton(actions, reset);
         refreshUI();
     }
 
+    private ReaderIcon addAction(LinearLayout actions, String symbol, String label,
+                                 View.OnClickListener callback) {
+        LinearLayout cell = new LinearLayout(this);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setGravity(Gravity.CENTER);
+        cell.setContentDescription(label);
+        cell.setOnClickListener(view -> {
+            if (ready()) callback.onClick(view);
+        });
+        actions.addView(cell, new LinearLayout.LayoutParams(0, dp(65), 1));
+
+        ReaderIcon icon = iconButton(symbol, label, view -> {
+            if (ready()) callback.onClick(view);
+        });
+        cell.addView(icon, new LinearLayout.LayoutParams(dp(40), dp(38)));
+        TextView caption = text(label, 10, barMuted, false);
+        caption.setGravity(Gravity.CENTER);
+        cell.addView(caption, new LinearLayout.LayoutParams(-1, dp(18)));
+        documentButtons.add(icon);
+        return icon;
+    }
+
+    private void showReaderMenu(View anchor) {
+        android.widget.PopupMenu popup = new android.widget.PopupMenu(this, anchor);
+        popup.getMenu().add(0, 1, 0, "Save edited copy");
+        popup.getMenu().add(0, 2, 1, "Reset page order");
+        popup.getMenu().add(0, 3, 2, "Open another PDF");
+        popup.setOnMenuItemClickListener(item -> {
+            switch (item.getItemId()) {
+                case 1:
+                    if (ready()) chooseSaveDestination(new ArrayList<>(pageOrder), "-edited");
+                    return true;
+                case 2:
+                    resetPages();
+                    return true;
+                case 3:
+                    chooseDocument();
+                    return true;
+            }
+            return false;
+        });
+        popup.show();
+    }
+
+    private void updatePageCounter() {
+        if (pageBadge == null || pageLabel == null) return;
+        boolean has = renderer != null && !pageOrder.isEmpty();
+        pageBadge.setVisibility(has ? View.VISIBLE : View.GONE);
+        pageBadge.setText(has ? String.valueOf(pageIndex + 1) : "");
+        pageLabel.setText(has
+            ? (pageIndex + 1) + " / " + pageOrder.size() + " pages"
+            : "Open a document");
+        if (footerView instanceof LinearLayout) {
+            LinearLayout footer = (LinearLayout)footerView;
+            LinearLayout paging = (LinearLayout)footer.getChildAt(0);
+            for (int i = 0; i < paging.getChildCount(); i++) {
+                View child = paging.getChildAt(i);
+                if ("page-counter".equals(child.getTag()) && child instanceof TextView) {
+                    ((TextView)child).setText(has
+                        ? (pageIndex + 1) + " / " + pageOrder.size() : "— / —");
+                    break;
+                }
+            }
+        }
+    }
+
+    private void showPageBadge() {
+        if (pageBadge == null || renderer == null || !chromeVisible) return;
+        pageBadge.setVisibility(View.VISIBLE);
+        pageBadge.animate().cancel();
+        pageBadge.animate().alpha(1f).setDuration(90).start();
+        if (badgeFade != null) pageBadge.removeCallbacks(badgeFade);
+        badgeFade = () -> {
+            if (pageBadge != null) pageBadge.animate().alpha(0f)
+                .setDuration(200).start();
+        };
+        pageBadge.postDelayed(badgeFade, 1300);
+    }
+
     private void applyChrome() {
-        int visibility = chromeVisible ? View.VISIBLE : View.GONE;
-        if (headerView != null) headerView.setVisibility(visibility);
-        if (footerView != null) footerView.setVisibility(visibility);
-        if (topDivider != null) topDivider.setVisibility(visibility);
-        if (bottomDivider != null) bottomDivider.setVisibility(visibility);
+        animateBar(headerView, chromeVisible, true);
+        animateBar(footerView, chromeVisible, false);
+        if (pageBadge != null && !chromeVisible) {
+            pageBadge.animate().cancel();
+            pageBadge.animate().alpha(0f).setDuration(130).start();
+        } else if (chromeVisible) {
+            showPageBadge();
+        }
+    }
+
+    private void animateBar(View bar, boolean show, boolean top) {
+        if (bar == null) return;
+        bar.animate().cancel();
+        int displacement = top ? -1 : 1;
+        if (show) {
+            bar.setVisibility(View.VISIBLE);
+            if (bar.getAlpha() < .9f) {
+                bar.setTranslationY(displacement * dp(top ? 18 : 22));
+            }
+            bar.animate().alpha(1f).translationY(0f).setDuration(185)
+                .setInterpolator(new android.view.animation.DecelerateInterpolator(1.4f))
+                .start();
+        } else {
+            bar.animate().alpha(0f)
+                .translationY(displacement * dp(top ? 18 : 22))
+                .setDuration(165)
+                .setInterpolator(new android.view.animation.AccelerateInterpolator(1.1f))
+                .withEndAction(() -> {
+                    if (!chromeVisible) bar.setVisibility(View.GONE);
+                })
+                .start();
+        }
     }
 
     private void toggleChrome() {
@@ -384,7 +499,7 @@ public class MainActivity extends Activity {
             .setSingleChoiceItems(labels, selected, (dialog, index) -> {
                 float level = ZOOM_LEVELS[index] / 100f;
                 if (focused) {
-                    if (focusPage != null) focusPage.setZoom(level);
+                    if (focusPage != null) focusPage.animateToZoom(level);
                 } else {
                     pdfPages.setZoom(level);
                 }
@@ -396,7 +511,7 @@ public class MainActivity extends Activity {
 
     private void showFocus(int position) {
         if (!ready() || position < 0 || position >= pageOrder.size()) return;
-        closeFocus();
+        closeFocus(false);
         final int originalPage = pageOrder.get(position);
         final int request = ++focusGeneration;
         final Uri source = sourceUri;
@@ -427,24 +542,30 @@ public class MainActivity extends Activity {
         LinearLayout bar = new LinearLayout(this);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setPadding(dp(12), dp(6), dp(12), dp(6));
-        bar.setBackgroundColor(colors.surface);
+        bar.setBackgroundColor(barBackground);
         focusToolbar = bar;
         focusOverlay.addView(bar, new FrameLayout.LayoutParams(-1, dp(58), Gravity.TOP));
 
-        Button close = button("×", v -> closeFocus());
-        close.setTextSize(25);
-        close.setContentDescription("Close focused page");
-        addButton(bar, close);
+        ReaderIcon close = iconButton(ReaderIcon.CLOSE, "Close focused page",
+            view -> closeFocus());
+        bar.addView(close, new LinearLayout.LayoutParams(dp(48), dp(46)));
 
         TextView title = text("Page " + (position + 1) + " of " + pageOrder.size(),
-            15, colors.foreground, true);
+            15, barForeground, true);
         bar.addView(title, new LinearLayout.LayoutParams(0, -1, 1));
 
         focusZoomButton = button("100% ▾", v -> chooseZoom(true));
+        focusZoomButton.setTextColor(barForeground);
+        focusZoomButton.setBackground(colors.rounded(this, Color.TRANSPARENT,
+            Color.TRANSPARENT, 9));
         focusZoomButton.setContentDescription("Focused zoom level");
         bar.addView(focusZoomButton, new LinearLayout.LayoutParams(-2, dp(42)));
 
+        focusOverlay.setAlpha(0f);
         host.addView(focusOverlay, new FrameLayout.LayoutParams(-1, -1));
+        focusOverlay.animate().alpha(1f).setDuration(170)
+            .setInterpolator(new android.view.animation.DecelerateInterpolator(1.4f))
+            .start();
         background.execute(() -> {
             Bitmap rendered = null;
             String error = null;
@@ -476,7 +597,9 @@ public class MainActivity extends Activity {
                 if (result != null) {
                     if (focusLoading != null) focusLoading.setVisibility(View.GONE);
                     focusPage.setBitmap(result);
-                    focusPage.setZoom(1.5f);
+                    focusPage.setAlpha(0f);
+                    focusPage.animate().alpha(1f).setDuration(160).start();
+                    focusPage.animateToZoom(1.5f);
                 } else {
                     toast("Unable to focus page: " + message);
                     closeFocus();
@@ -485,17 +608,28 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void closeFocus() {
+    private void closeFocus() { closeFocus(true); }
+
+    private void closeFocus(boolean animate) {
         focusGeneration++;
-        if (focusPage != null) focusPage.dispose();
+        final FrameLayout overlay = focusOverlay;
+        final FocusPageView page = focusPage;
+        focusOverlay = null;
         focusPage = null;
         focusZoomButton = null;
         focusToolbar = null;
         focusLoading = null;
-        if (focusOverlay != null) {
-            if (host != null) host.removeView(focusOverlay);
-            focusOverlay = null;
-        }
+        if (overlay == null) return;
+        overlay.animate().cancel();
+        Runnable clean = () -> {
+            if (host != null && overlay.getParent() == host) host.removeView(overlay);
+            if (page != null) page.dispose();
+        };
+        if (animate) {
+            overlay.animate().alpha(0f).setDuration(145)
+                .setInterpolator(new android.view.animation.AccelerateInterpolator(1.2f))
+                .withEndAction(clean).start();
+        } else clean.run();
     }
 
     @Override public void onBackPressed() {
@@ -514,25 +648,25 @@ public class MainActivity extends Activity {
     private void refreshUI() {
         boolean has = renderer != null && !pageOrder.isEmpty();
         boolean enabled = has && !busy;
-        saveButton.setEnabled(enabled);
-        shareButton.setEnabled(enabled);
-        openButton.setEnabled(!busy);
-        saveButton.setAlpha(enabled ? 1f : .38f);
-        shareButton.setAlpha(enabled ? 1f : .38f);
-        for (Button action : documentButtons) {
+        if (saveButton != null) saveButton.setEnabled(enabled);
+        if (shareButton != null) {
+            shareButton.setEnabled(enabled);
+            shareButton.setAlpha(enabled ? 1f : .40f);
+        }
+        if (openButton != null) openButton.setEnabled(!busy);
+        for (View action : documentButtons) {
             action.setEnabled(enabled);
             action.setAlpha(enabled ? 1f : .40f);
         }
-        fileLabel.setText(has ? documentName : "No document selected");
-        pageLabel.setText(has
-            ? "Page " + (pageIndex + 1) + " of " + pageOrder.size() + "   ▾"
-            : "Page — of —");
+        fileLabel.setText(has ? documentName : "PDF");
+        updatePageCounter();
 
     }
 
     private void setBusy(boolean value) {
         busy = value;
-        saveButton.setText(value ? "Working…" : "Save");
+        if (saveButton != null)
+            saveButton.setContentDescription(value ? "Saving PDF…" : "Save PDF");
         refreshUI();
     }
 
@@ -591,6 +725,7 @@ public class MainActivity extends Activity {
             chromeVisible = true;
             applyChrome();
             pdfPages.setDocument(renderer, pageOrder);
+            showPageBadge();
             if (zoomButton != null) zoomButton.setText("100% ▾");
             emptyView.setVisibility(View.GONE);
             refreshUI();
@@ -600,7 +735,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeDocument() {
-        closeFocus();
+        closeFocus(false);
         if (pdfPages != null) pdfPages.clearDocument();
         if (emptyView != null) emptyView.setVisibility(View.VISIBLE);
         if (renderer != null) { try { renderer.close(); } catch (Exception ignored) { } renderer = null; }

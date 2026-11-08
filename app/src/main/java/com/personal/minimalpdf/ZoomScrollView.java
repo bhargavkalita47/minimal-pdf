@@ -11,7 +11,7 @@ import android.widget.HorizontalScrollView;
  * One-finger gestures remain available for ordinary page scrolling and horizontal panning.
  */
 public final class ZoomScrollView extends HorizontalScrollView {
-    public interface PinchListener { void onPinch(float scale, float focusX); }
+    public interface PinchListener { void onPinch(float scale, float focusX, float focusY); }
 
     private final ScaleGestureDetector scaleDetector;
     private PinchListener listener;
@@ -29,7 +29,7 @@ public final class ZoomScrollView extends HorizontalScrollView {
                 }
                 @Override public boolean onScale(ScaleGestureDetector detector) {
                     if (listener != null) {
-                        listener.onPinch(detector.getScaleFactor(), detector.getFocusX());
+                        listener.onPinch(detector.getScaleFactor(), detector.getFocusX(), detector.getFocusY());
                     }
                     return true;
                 }

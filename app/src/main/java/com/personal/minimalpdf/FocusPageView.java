@@ -1,5 +1,6 @@
 package com.personal.minimalpdf;
 
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -10,6 +11,7 @@ import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
+import android.view.animation.DecelerateInterpolator;
 
 /** One focused PDF page drawn above the scrollable document. */
 public final class FocusPageView extends View {
@@ -29,6 +31,7 @@ public final class FocusPageView extends View {
     private float panX, panY;
     private float lastX, lastY;
     private boolean movedWithFingers = false;
+    private ValueAnimator zoomAnimator;
 
     public FocusPageView(Context context, Actions actions) {
         super(context);
@@ -51,6 +54,7 @@ public final class FocusPageView extends View {
         pinches = new ScaleGestureDetector(context,
             new ScaleGestureDetector.SimpleOnScaleGestureListener() {
                 @Override public boolean onScale(ScaleGestureDetector d) {
+                    if (zoomAnimator != null) zoomAnimator.cancel();
                     changeZoom(zoom * d.getScaleFactor(), d.getFocusX(), d.getFocusY());
                     return true;
                 }
@@ -69,10 +73,25 @@ public final class FocusPageView extends View {
     public float getZoom() { return zoom; }
 
     public void setZoom(float zoom) {
+        if (zoomAnimator != null) zoomAnimator.cancel();
         changeZoom(zoom, getWidth() / 2f, getHeight() / 2f);
     }
 
+    public void animateToZoom(float destination) {
+        if (bitmap == null) return;
+        if (zoomAnimator != null) zoomAnimator.cancel();
+        zoomAnimator = ValueAnimator.ofFloat(zoom,
+            Math.max(1f, Math.min(5f, destination)));
+        zoomAnimator.setDuration(180L);
+        zoomAnimator.setInterpolator(new DecelerateInterpolator(1.3f));
+        zoomAnimator.addUpdateListener(animation -> changeZoom(
+            (float) animation.getAnimatedValue(),
+            getWidth() / 2f, getHeight() / 2f));
+        zoomAnimator.start();
+    }
+
     public void dispose() {
+        if (zoomAnimator != null) zoomAnimator.cancel();
         if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
         bitmap = null;
         invalidate();
