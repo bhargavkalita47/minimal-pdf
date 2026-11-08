@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main, dev/gesture-focus-view]
+    branches: [main, dev/immersive-reader-ui]
   workflow_dispatch:
 
 jobs:
