@@ -9,10 +9,10 @@ import android.graphics.RectF;
 import android.graphics.pdf.PdfRenderer;
 import android.util.LruCache;
 import android.view.MotionEvent;
-import android.view.ScaleGestureDetector;
+import android.view.GestureDetector;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.HorizontalScrollView;
+
 
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
@@ -29,7 +29,12 @@ import java.util.concurrent.Executors;
  * off-screen bitmaps are kept in a bounded cache instead of loading the whole PDF.
  */
 public final class PdfPageList extends RecyclerView {
-    public interface PageListener { void onVisiblePageChanged(int position); }
+    public interface PageListener {
+        void onVisiblePageChanged(int position);
+        void onSingleTap();
+        void onDoubleTap(int position);
+        void onZoomChanged(float zoom);
+    }
 
     private final Object renderLock = new Object();
     private final ExecutorService renderQueue = Executors.newSingleThreadExecutor();
@@ -43,14 +48,13 @@ public final class PdfPageList extends RecyclerView {
     private final LinearLayoutManager layout;
     private final PageAdapter adapter = new PageAdapter();
     private final PageListener listener;
-    private final HorizontalScrollView pan;
-    private final ScaleGestureDetector scaleDetector;
+    private final ZoomScrollView pan;
     private List<Integer> pageOrder = new ArrayList<>();
     private PdfRenderer pdf;
     private volatile int generation = 0;
     private float zoom = 1f;
 
-    public PdfPageList(Context context, HorizontalScrollView pan, PageListener listener) {
+    public PdfPageList(Context context, ZoomScrollView pan, PageListener listener) {
         super(context);
         this.listener = listener;
         this.pan = pan;
@@ -62,13 +66,7 @@ public final class PdfPageList extends RecyclerView {
         setHasFixedSize(false);
         setBackgroundColor(Color.rgb(229, 231, 235));
         // The item widths change during zoom. RecyclerView recycles rows as we scroll.
-        scaleDetector = new ScaleGestureDetector(context,
-            new ScaleGestureDetector.SimpleOnScaleGestureListener() {
-                @Override public boolean onScale(ScaleGestureDetector detector) {
-                    updateZoom(detector.getScaleFactor(), detector.getFocusX());
-                    return true;
-                }
-            });
+        pan.setPinchListener((scale, focusX) -> zoomBy(scale, focusX));
         addOnScrollListener(new OnScrollListener() {
             @Override public void onScrolled(RecyclerView view, int dx, int dy) {
                 notifyVisiblePage();
@@ -132,46 +130,34 @@ public final class PdfPageList extends RecyclerView {
         listener.onVisiblePageChanged(index);
     }
 
-    public void resetZoom() {
-        zoom = 1f;
-        ViewGroup.LayoutParams p = getLayoutParams();
-        if (p != null) {
-            p.width = ViewGroup.LayoutParams.MATCH_PARENT;
-            setLayoutParams(p);
-        }
-        pan.post(() -> pan.scrollTo(0, 0));
+    public float getZoom() { return zoom; }
+
+    public void resetZoom() { setZoom(1f); }
+
+    public void setZoom(float level) {
+        updateZoom(level, pan.getWidth() / 2f);
     }
 
-    private void updateZoom(float multiplier, float focus) {
-        if (pan.getWidth() <= 0) return;
-        float next = Math.max(1f, Math.min(3f, zoom * multiplier));
-        if (Math.abs(next - zoom) < .002f) return;
-        float oldWidth = pan.getWidth() * zoom;
-        float focusFraction = (pan.getScrollX() + focus) / Math.max(1f, oldWidth);
+    private void zoomBy(float multiplier, float focus) {
+        updateZoom(zoom * multiplier, focus);
+    }
+
+    private void updateZoom(float requested, float focus) {
+        if (pan.getWidth() <= 0) {
+            zoom = Math.max(1f, Math.min(4f, requested));
+            return;
+        }
+        float next = Math.max(1f, Math.min(4f, requested));
+        float oldWidth = Math.max(1f, pan.getWidth() * zoom);
+        float contentFocusFraction = (pan.getScrollX() + focus) / oldWidth;
         zoom = next;
         ViewGroup.LayoutParams params = getLayoutParams();
         if (params == null) return;
         params.width = Math.max(pan.getWidth(), Math.round(pan.getWidth() * zoom));
         setLayoutParams(params);
-        post(() -> pan.scrollTo(Math.round(focusFraction * getWidth() - focus), 0));
-    }
-
-    @Override public boolean dispatchTouchEvent(MotionEvent event) {
-        // Observe both fingers before the list handles its normal single-finger scroll.
-        scaleDetector.onTouchEvent(event);
-        if (event.getPointerCount() > 1 && getParent() != null)
-            getParent().requestDisallowInterceptTouchEvent(true);
-        return super.dispatchTouchEvent(event);
-    }
-
-    @Override public boolean onInterceptTouchEvent(MotionEvent event) {
-        if (event.getPointerCount() > 1 || scaleDetector.isInProgress()) return true;
-        return super.onInterceptTouchEvent(event);
-    }
-
-    @Override public boolean onTouchEvent(MotionEvent event) {
-        if (event.getPointerCount() > 1 || scaleDetector.isInProgress()) return true;
-        return super.onTouchEvent(event);
+        post(() -> pan.scrollTo(
+            Math.max(0, Math.round(contentFocusFraction * getWidth() - focus)), 0));
+        listener.onZoomChanged(zoom);
     }
 
     public void dispose() {
@@ -230,9 +216,18 @@ public final class PdfPageList extends RecyclerView {
             page.setLayoutParams(new LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             PageHolder holder = new PageHolder(page);
-            page.setOnClickListener(view -> {
-                int index = holder.getBindingAdapterPosition();
-                if (index != NO_POSITION) listener.onVisiblePageChanged(index);
+            page.setTapActions(new PageView.TapActions() {
+                @Override public void singleTap() {
+                    int index = holder.getBindingAdapterPosition();
+                    if (index != NO_POSITION) {
+                        listener.onVisiblePageChanged(index);
+                        listener.onSingleTap();
+                    }
+                }
+                @Override public void doubleTap() {
+                    int index = holder.getBindingAdapterPosition();
+                    if (index != NO_POSITION) listener.onDoubleTap(index);
+                }
             });
             return holder;
         }
@@ -262,6 +257,7 @@ public final class PdfPageList extends RecyclerView {
         private final Paint paper = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint imagePaint = new Paint(Paint.FILTER_BITMAP_FLAG);
         private Bitmap bitmap;
+        private GestureDetector taps;
         private float aspect = A4_ASPECT;
         private int gutterX, gutterY;
 
@@ -271,6 +267,38 @@ public final class PdfPageList extends RecyclerView {
             gutterX = (int)(12f * density + .5f);
             gutterY = (int)(9f * density + .5f);
             paper.setColor(Color.WHITE);
+        }
+
+        interface TapActions {
+            void singleTap();
+            void doubleTap();
+        }
+
+        void setTapActions(TapActions callbacks) {
+            taps = new GestureDetector(getContext(),
+                new GestureDetector.SimpleOnGestureListener() {
+                    @Override public boolean onDown(MotionEvent event) { return true; }
+                    @Override public boolean onSingleTapConfirmed(MotionEvent event) {
+                        callbacks.singleTap();
+                        return true;
+                    }
+                    @Override public boolean onDoubleTap(MotionEvent event) {
+                        callbacks.doubleTap();
+                        return true;
+                    }
+                });
+            setClickable(true);
+        }
+
+        @Override public boolean onTouchEvent(MotionEvent event) {
+            if (taps != null) taps.onTouchEvent(event);
+            if (event.getActionMasked() == MotionEvent.ACTION_UP) performClick();
+            return true;
+        }
+
+        @Override public boolean performClick() {
+            super.performClick();
+            return true;
         }
 
         void setBitmap(Bitmap updated) {

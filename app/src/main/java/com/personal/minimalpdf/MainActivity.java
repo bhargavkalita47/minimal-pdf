@@ -56,6 +56,17 @@ public class MainActivity extends Activity {
     private int pageIndex = 0;
     private String documentName = "document.pdf";
     private PdfPageList pdfPages;
+    private FrameLayout host;
+    private View headerView, footerView, topDivider, bottomDivider;
+    private boolean chromeVisible = true;
+    private Button zoomButton;
+    private FrameLayout focusOverlay;
+    private FocusPageView focusPage;
+    private Button focusZoomButton;
+    private View focusToolbar;
+    private TextView focusLoading;
+    private int focusGeneration = 0;
+    private static final int[] ZOOM_LEVELS = {100, 125, 150, 200, 300, 400};
     private View emptyView;
     private TextView fileLabel;
     private TextView pageLabel;
@@ -88,6 +99,10 @@ public class MainActivity extends Activity {
                     refreshUI();
                 }
             }
+        }
+        if (state != null) {
+            chromeVisible = state.getBoolean("chrome_visible", true);
+            applyChrome();
         }
     }
 
@@ -138,7 +153,7 @@ public class MainActivity extends Activity {
         item.setMinimumHeight(0);
         item.setElevation(0);
         item.setStateListAnimator(null);
-        item.setBackground(colors.rounded(this, colors.subtle, colors.stroke, 11));
+        item.setBackground(colors.rounded(this, colors.surface, Color.TRANSPARENT, 11));
         item.setOnClickListener(onClick);
         return item;
     }
@@ -149,7 +164,7 @@ public class MainActivity extends Activity {
     }
 
     private void quiet(Button item) {
-        item.setBackground(colors.rounded(this, colors.surface, colors.stroke, 11));
+        item.setBackground(colors.rounded(this, colors.surface, Color.TRANSPARENT, 11));
     }
 
     private Button documentButton(String title, View.OnClickListener onClick) {
@@ -168,13 +183,16 @@ public class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(colors.surface);
-        setContentView(root);
+        host = new FrameLayout(this);
+        host.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        setContentView(host);
 
         // File title stays readable; Share and Save remain at the top.
         LinearLayout header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
         header.setPadding(dp(16), dp(9), dp(9), dp(9));
         root.addView(header, new LinearLayout.LayoutParams(-1, dp(73)));
+        headerView = header;
 
         LinearLayout identity = new LinearLayout(this);
         identity.setOrientation(LinearLayout.VERTICAL);
@@ -205,19 +223,24 @@ public class MainActivity extends Activity {
         View dividerTop = new View(this);
         dividerTop.setBackgroundColor(colors.stroke);
         root.addView(dividerTop, new LinearLayout.LayoutParams(-1, dp(1)));
+        topDivider = dividerTop;
 
         FrameLayout content = new FrameLayout(this);
         content.setBackgroundColor(colors.canvas);
         root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        HorizontalScrollView pan = new HorizontalScrollView(this);
-        pan.setFillViewport(true);
-        pan.setHorizontalScrollBarEnabled(false);
-        pan.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        pdfPages = new PdfPageList(this, pan, position -> {
-            if (renderer != null && pageIndex != position) {
-                pageIndex = position;
-                refreshUI();
+        ZoomScrollView pan = new ZoomScrollView(this);
+        pdfPages = new PdfPageList(this, pan, new PdfPageList.PageListener() {
+            @Override public void onVisiblePageChanged(int position) {
+                if (renderer != null && pageIndex != position) {
+                    pageIndex = position;
+                    refreshUI();
+                }
+            }
+            @Override public void onSingleTap() { toggleChrome(); }
+            @Override public void onDoubleTap(int position) { showFocus(position); }
+            @Override public void onZoomChanged(float zoom) {
+                if (zoomButton != null) zoomButton.setText(zoomTitle(zoom));
             }
         });
         pdfPages.setBackgroundColor(colors.canvas);
@@ -261,11 +284,13 @@ public class MainActivity extends Activity {
         View dividerBottom = new View(this);
         dividerBottom.setBackgroundColor(colors.stroke);
         root.addView(dividerBottom, new LinearLayout.LayoutParams(-1, dp(1)));
+        bottomDivider = dividerBottom;
 
         LinearLayout footer = new LinearLayout(this);
         footer.setOrientation(LinearLayout.VERTICAL);
         footer.setBackgroundColor(colors.surface);
         root.addView(footer, new LinearLayout.LayoutParams(-1, -2));
+        footerView = footer;
 
         LinearLayout navigation = new LinearLayout(this);
         navigation.setGravity(Gravity.CENTER_VERTICAL);
@@ -285,6 +310,11 @@ public class MainActivity extends Activity {
         pageLabel.setOnClickListener(v -> showPages());
         pageLabel.setContentDescription("Choose a page");
         pageInfo.addView(pageLabel, new LinearLayout.LayoutParams(-1, dp(25)));
+
+        zoomButton = documentButton("100% ▾", v -> chooseZoom(false));
+        zoomButton.setContentDescription("Zoom level");
+        quiet(zoomButton);
+        addButton(navigation, zoomButton);
 
         Button previous = documentButton("‹", v -> navigate(-1));
         previous.setTextSize(25);
@@ -316,6 +346,167 @@ public class MainActivity extends Activity {
         Button reset = documentButton("Reset", v -> resetPages());
         addButton(actions, reset);
         refreshUI();
+    }
+
+    private void applyChrome() {
+        int visibility = chromeVisible ? View.VISIBLE : View.GONE;
+        if (headerView != null) headerView.setVisibility(visibility);
+        if (footerView != null) footerView.setVisibility(visibility);
+        if (topDivider != null) topDivider.setVisibility(visibility);
+        if (bottomDivider != null) bottomDivider.setVisibility(visibility);
+    }
+
+    private void toggleChrome() {
+        if (renderer == null || focusOverlay != null) return;
+        chromeVisible = !chromeVisible;
+        applyChrome();
+    }
+
+    private String zoomTitle(float zoom) {
+        return Math.round(zoom * 100) + "% ▾";
+    }
+
+    private void chooseZoom(boolean focused) {
+        if (!ready() && !focused) return;
+        String[] labels = new String[ZOOM_LEVELS.length];
+        float current = focused
+            ? (focusPage == null ? 1f : focusPage.getZoom())
+            : pdfPages.getZoom();
+        int selected = 0;
+        float closest = Float.MAX_VALUE;
+        for (int i = 0; i < ZOOM_LEVELS.length; i++) {
+            labels[i] = ZOOM_LEVELS[i] + "%";
+            float delta = Math.abs(current * 100f - ZOOM_LEVELS[i]);
+            if (delta < closest) { closest = delta; selected = i; }
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("Zoom level")
+            .setSingleChoiceItems(labels, selected, (dialog, index) -> {
+                float level = ZOOM_LEVELS[index] / 100f;
+                if (focused) {
+                    if (focusPage != null) focusPage.setZoom(level);
+                } else {
+                    pdfPages.setZoom(level);
+                }
+                dialog.dismiss();
+            })
+            .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    private void showFocus(int position) {
+        if (!ready() || position < 0 || position >= pageOrder.size()) return;
+        closeFocus();
+        final int originalPage = pageOrder.get(position);
+        final int request = ++focusGeneration;
+        final Uri source = sourceUri;
+        focusOverlay = new FrameLayout(this);
+        // A dimmed scrim leaves the document visible beneath the lifted page.
+        focusOverlay.setBackgroundColor(Color.argb(
+            colors.dark ? 225 : 190, 14, 18, 25));
+        focusPage = new FocusPageView(this, new FocusPageView.Actions() {
+            @Override public void onDoubleTap() { closeFocus(); }
+            @Override public void onSingleTap() {
+                if (focusToolbar != null) {
+                    focusToolbar.setVisibility(
+                        focusToolbar.getVisibility() == View.VISIBLE
+                            ? View.GONE : View.VISIBLE);
+                }
+            }
+            @Override public void onZoomChanged(float zoom) {
+                if (focusZoomButton != null) focusZoomButton.setText(zoomTitle(zoom));
+            }
+        });
+        focusOverlay.addView(focusPage, new FrameLayout.LayoutParams(-1, -1));
+
+        focusLoading = text("Loading page…", 14, Color.WHITE, false);
+        focusLoading.setGravity(Gravity.CENTER);
+        focusOverlay.addView(focusLoading,
+            new FrameLayout.LayoutParams(-1, dp(50), Gravity.CENTER));
+
+        LinearLayout bar = new LinearLayout(this);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(dp(12), dp(6), dp(12), dp(6));
+        bar.setBackgroundColor(colors.surface);
+        focusToolbar = bar;
+        focusOverlay.addView(bar, new FrameLayout.LayoutParams(-1, dp(58), Gravity.TOP));
+
+        Button close = button("×", v -> closeFocus());
+        close.setTextSize(25);
+        close.setContentDescription("Close focused page");
+        addButton(bar, close);
+
+        TextView title = text("Page " + (position + 1) + " of " + pageOrder.size(),
+            15, colors.foreground, true);
+        bar.addView(title, new LinearLayout.LayoutParams(0, -1, 1));
+
+        focusZoomButton = button("100% ▾", v -> chooseZoom(true));
+        focusZoomButton.setContentDescription("Focused zoom level");
+        bar.addView(focusZoomButton, new LinearLayout.LayoutParams(-2, dp(42)));
+
+        host.addView(focusOverlay, new FrameLayout.LayoutParams(-1, -1));
+        background.execute(() -> {
+            Bitmap rendered = null;
+            String error = null;
+            try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(source, "r")) {
+                if (descriptor == null) throw new Exception("Can't open PDF");
+                try (PdfRenderer focusedRenderer = new PdfRenderer(descriptor);
+                     PdfRenderer.Page page = focusedRenderer.openPage(originalPage)) {
+                    float scale = Math.min(3.5f,
+                        3000f / Math.max(page.getWidth(), page.getHeight()));
+                    rendered = Bitmap.createBitmap(
+                        Math.max(1, Math.round(page.getWidth() * scale)),
+                        Math.max(1, Math.round(page.getHeight() * scale)),
+                        Bitmap.Config.ARGB_8888);
+                    rendered.eraseColor(Color.WHITE);
+                    page.render(rendered, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+                }
+            } catch (Exception e) {
+                if (rendered != null) rendered.recycle();
+                rendered = null;
+                error = errorMessage(e);
+            }
+            final Bitmap result = rendered;
+            final String message = error;
+            runOnUiThread(() -> {
+                if (request != focusGeneration || focusOverlay == null || focusPage == null) {
+                    if (result != null) result.recycle();
+                    return;
+                }
+                if (result != null) {
+                    if (focusLoading != null) focusLoading.setVisibility(View.GONE);
+                    focusPage.setBitmap(result);
+                    focusPage.setZoom(1.5f);
+                } else {
+                    toast("Unable to focus page: " + message);
+                    closeFocus();
+                }
+            });
+        });
+    }
+
+    private void closeFocus() {
+        focusGeneration++;
+        if (focusPage != null) focusPage.dispose();
+        focusPage = null;
+        focusZoomButton = null;
+        focusToolbar = null;
+        focusLoading = null;
+        if (focusOverlay != null) {
+            if (host != null) host.removeView(focusOverlay);
+            focusOverlay = null;
+        }
+    }
+
+    @Override public void onBackPressed() {
+        if (focusOverlay != null) {
+            closeFocus();
+        } else if (!chromeVisible) {
+            chromeVisible = true;
+            applyChrome();
+        } else {
+            super.onBackPressed();
+        }
     }
 
     private boolean ready() { return renderer != null && !pageOrder.isEmpty() && !busy; }
@@ -397,7 +588,10 @@ public class MainActivity extends Activity {
             pageOrder.clear();
             for (int index = 0; index < renderer.getPageCount(); index++) pageOrder.add(index);
             pageIndex = 0;
+            chromeVisible = true;
+            applyChrome();
             pdfPages.setDocument(renderer, pageOrder);
+            if (zoomButton != null) zoomButton.setText("100% ▾");
             emptyView.setVisibility(View.GONE);
             refreshUI();
         } catch (Exception error) {
@@ -406,6 +600,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeDocument() {
+        closeFocus();
         if (pdfPages != null) pdfPages.clearDocument();
         if (emptyView != null) emptyView.setVisibility(View.VISIBLE);
         if (renderer != null) { try { renderer.close(); } catch (Exception ignored) { } renderer = null; }
@@ -682,6 +877,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
+        state.putBoolean("chrome_visible", chromeVisible);
         if (sourceUri != null && renderer != null) {
             state.putString("open_uri", sourceUri.toString());
             state.putIntegerArrayList("page_order", new ArrayList<>(pageOrder));
@@ -692,6 +888,7 @@ public class MainActivity extends Activity {
     @Override public void onConfigurationChanged(Configuration config) {
         super.onConfigurationChanged(config);
         if (pdfPages != null) pdfPages.resetZoom();
+        if (zoomButton != null) zoomButton.setText("100% ▾");
     }
 
     @Override protected void onDestroy() {
