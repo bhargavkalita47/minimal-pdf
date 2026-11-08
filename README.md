@@ -5,7 +5,8 @@ A minimal offline Android PDF reader and page organizer for personal use. No acc
 ## Features
 
 - Open PDF files using Android's document picker or another app's **Open with** action
-- View pages, pinch to zoom, and jump to any page using **Pages**
+- Scroll vertically through the entire PDF continuously, with pages rendered lazily for memory efficiency
+- Pinch to zoom (and pan horizontally when zoomed in), or jump using **Pages**
 - **Move to…** reposition the current page anywhere in the PDF
 - **Remove** a page from the output, or **Reset** to restore the original order
 - **Extract** a 1-based inclusive range such as pages **10–20** into a separate PDF
