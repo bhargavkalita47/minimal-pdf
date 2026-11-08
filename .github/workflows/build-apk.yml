@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main, dev/continuous-scroll]
+    branches: [main, dev/polished-adaptive-ui]
   workflow_dispatch:
 
 jobs:

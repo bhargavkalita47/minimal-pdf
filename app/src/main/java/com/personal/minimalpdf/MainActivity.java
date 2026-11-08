@@ -45,8 +45,8 @@ import java.util.concurrent.Executors;
 public class MainActivity extends Activity {
     private static final int OPEN_FILE = 101;
     private static final int SAVE_FILE = 102;
-    private static final int INK = Color.rgb(27, 30, 36);
-    private static final int SOFT = Color.rgb(242, 243, 245);
+    private UiPalette colors;
+    private final ArrayList<Button> documentButtons = new ArrayList<>();
 
     private Uri sourceUri;
     private ParcelFileDescriptor sourceFd;
@@ -56,7 +56,7 @@ public class MainActivity extends Activity {
     private int pageIndex = 0;
     private String documentName = "document.pdf";
     private PdfPageList pdfPages;
-    private TextView emptyView;
+    private View emptyView;
     private TextView fileLabel;
     private TextView pageLabel;
     private Button saveButton;
@@ -69,14 +69,26 @@ public class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        getWindow().setStatusBarColor(Color.WHITE);
-        getWindow().setNavigationBarColor(Color.WHITE);
-        getWindow().getDecorView().setSystemUiVisibility(
-            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        colors = UiPalette.from(this);
+        styleSystemBars();
         PDFBoxResourceLoader.init(getApplicationContext());
         buildInterface();
-        Uri incoming = getIntent() == null ? null : getIntent().getData();
-        if (incoming != null) openDocument(incoming);
+        String savedUri = state == null ? null : state.getString("open_uri");
+        Uri incoming = savedUri == null
+            ? (getIntent() == null ? null : getIntent().getData()) : Uri.parse(savedUri);
+        if (incoming != null) {
+            openDocument(incoming);
+            if (renderer != null && state != null && savedUri != null) {
+                ArrayList<Integer> savedOrder = state.getIntegerArrayList("page_order");
+                if (validOrder(savedOrder)) {
+                    pageOrder.clear();
+                    pageOrder.addAll(savedOrder);
+                    pageIndex = Math.min(Math.max(0, state.getInt("page_index", 0)), pageOrder.size() - 1);
+                    pdfPages.pagesChanged(pageIndex);
+                    refreshUI();
+                }
+            }
+        }
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -89,72 +101,115 @@ public class MainActivity extends Activity {
         return (int) (value * getResources().getDisplayMetrics().density + .5f);
     }
 
-    private GradientDrawable shape(int color) {
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(color);
-        background.setCornerRadius(dp(10));
-        return background;
+    private void styleSystemBars() {
+        getWindow().setStatusBarColor(colors.surface);
+        getWindow().setNavigationBarColor(colors.surface);
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            getWindow().setNavigationBarContrastEnforced(false);
+        }
+        int flags = colors.dark ? 0 :
+            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        getWindow().getDecorView().setSystemUiVisibility(flags);
     }
 
-    private Button button(String title, View.OnClickListener action) {
-        Button b = new Button(this);
-        b.setText(title);
-        b.setTextSize(13);
-        b.setTextColor(INK);
-        b.setAllCaps(false);
-        b.setPadding(dp(13), 0, dp(13), 0);
-        b.setMinWidth(0);
-        b.setMinimumWidth(0);
-        b.setMinHeight(0);
-        b.setMinimumHeight(0);
-        b.setBackground(shape(SOFT));
-        b.setOnClickListener(action);
-        return b;
+    private TextView text(String value, int size, int color, boolean medium) {
+        TextView view = new TextView(this);
+        view.setText(value);
+        view.setTextSize(size);
+        view.setTextColor(color);
+        view.setGravity(Gravity.CENTER_VERTICAL);
+        if (medium) view.setTypeface(android.graphics.Typeface.create(
+            "sans-serif-medium", android.graphics.Typeface.NORMAL));
+        return view;
     }
 
-    private void addButton(LinearLayout row, Button b) {
+    private Button button(String title, View.OnClickListener onClick) {
+        Button item = new Button(this);
+        item.setText(title);
+        item.setTextSize(13);
+        item.setAllCaps(false);
+        item.setTypeface(android.graphics.Typeface.create(
+            "sans-serif-medium", android.graphics.Typeface.NORMAL));
+        item.setTextColor(colors.foreground);
+        item.setPadding(dp(13), 0, dp(13), 0);
+        item.setMinWidth(0);
+        item.setMinimumWidth(0);
+        item.setMinHeight(0);
+        item.setMinimumHeight(0);
+        item.setElevation(0);
+        item.setStateListAnimator(null);
+        item.setBackground(colors.rounded(this, colors.subtle, colors.stroke, 11));
+        item.setOnClickListener(onClick);
+        return item;
+    }
+
+    private void primary(Button item) {
+        item.setTextColor(colors.onAccent);
+        item.setBackground(colors.rounded(this, colors.accent, Color.TRANSPARENT, 11));
+    }
+
+    private void quiet(Button item) {
+        item.setBackground(colors.rounded(this, colors.surface, colors.stroke, 11));
+    }
+
+    private Button documentButton(String title, View.OnClickListener onClick) {
+        Button item = button(title, onClick);
+        documentButtons.add(item);
+        return item;
+    }
+
+    private void addButton(LinearLayout row, Button item) {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, dp(40));
         params.rightMargin = dp(7);
-        row.addView(b, params);
+        row.addView(item, params);
     }
 
     private void buildInterface() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.WHITE);
+        root.setBackgroundColor(colors.surface);
         setContentView(root);
 
+        // File title stays readable; Share and Save remain at the top.
         LinearLayout header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(dp(12), dp(8), dp(8), dp(8));
-        root.addView(header, new LinearLayout.LayoutParams(-1, dp(62)));
+        header.setPadding(dp(16), dp(9), dp(9), dp(9));
+        root.addView(header, new LinearLayout.LayoutParams(-1, dp(73)));
 
-        openButton = button("Open", v -> chooseDocument());
-        addButton(header, openButton);
+        LinearLayout identity = new LinearLayout(this);
+        identity.setOrientation(LinearLayout.VERTICAL);
+        identity.setGravity(Gravity.CENTER_VERTICAL);
+        header.addView(identity, new LinearLayout.LayoutParams(0, -1, 1));
 
-        fileLabel = new TextView(this);
+        TextView appTitle = text("PDF", 18, colors.foreground, true);
+        identity.addView(appTitle, new LinearLayout.LayoutParams(-1, dp(27)));
+
+        fileLabel = text("No document selected", 11, colors.mutedText, false);
         fileLabel.setSingleLine(true);
         fileLabel.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-        fileLabel.setTextSize(15);
-        fileLabel.setTextColor(INK);
-        fileLabel.setTypeface(null, 1);
-        fileLabel.setGravity(Gravity.CENTER_VERTICAL);
-        header.addView(fileLabel, new LinearLayout.LayoutParams(0, dp(40), 1));
+        identity.addView(fileLabel, new LinearLayout.LayoutParams(-1, dp(19)));
+
+        openButton = button("Open", v -> chooseDocument());
+        quiet(openButton);
+        addButton(header, openButton);
 
         shareButton = button("Share", v -> sharePages(new ArrayList<>(pageOrder)));
+        quiet(shareButton);
         addButton(header, shareButton);
-        saveButton = button("Save", v -> chooseSaveDestination(new ArrayList<>(pageOrder), "-edited"));
-        saveButton.setTextColor(Color.WHITE);
-        saveButton.setBackground(shape(INK));
+
+        saveButton = button("Save", v -> chooseSaveDestination(
+            new ArrayList<>(pageOrder), "-edited"));
+        primary(saveButton);
         header.addView(saveButton, new LinearLayout.LayoutParams(-2, dp(40)));
 
-        View rule = new View(this);
-        rule.setBackgroundColor(Color.rgb(230, 232, 236));
-        root.addView(rule, new LinearLayout.LayoutParams(-1, dp(1)));
+        View dividerTop = new View(this);
+        dividerTop.setBackgroundColor(colors.stroke);
+        root.addView(dividerTop, new LinearLayout.LayoutParams(-1, dp(1)));
 
         FrameLayout content = new FrameLayout(this);
-        content.setBackgroundColor(Color.rgb(228, 230, 234));
+        content.setBackgroundColor(colors.canvas);
         root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
+
         HorizontalScrollView pan = new HorizontalScrollView(this);
         pan.setFillViewport(true);
         pan.setHorizontalScrollBarEnabled(false);
@@ -165,38 +220,101 @@ public class MainActivity extends Activity {
                 refreshUI();
             }
         });
+        pdfPages.setBackgroundColor(colors.canvas);
         pan.addView(pdfPages, new HorizontalScrollView.LayoutParams(-1, -1));
         content.addView(pan, new FrameLayout.LayoutParams(-1, -1));
 
-        emptyView = new TextView(this);
-        emptyView.setText("Open a PDF to begin");
-        emptyView.setTextColor(Color.DKGRAY);
-        emptyView.setTextSize(17);
-        emptyView.setGravity(Gravity.CENTER);
+        LinearLayout empty = new LinearLayout(this);
+        empty.setOrientation(LinearLayout.VERTICAL);
+        empty.setGravity(Gravity.CENTER);
+        empty.setPadding(dp(20), dp(30), dp(20), dp(30));
+        empty.setBackgroundColor(colors.canvas);
+
+        TextView icon = text("PDF", 14, colors.accent, true);
+        icon.setGravity(Gravity.CENTER);
+        icon.setLetterSpacing(.04f);
+        icon.setBackground(colors.rounded(this, colors.subtle, colors.stroke, 17));
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(70), dp(70));
+        iconParams.bottomMargin = dp(21);
+        empty.addView(icon, iconParams);
+
+        TextView message = text("Open a PDF", 19, colors.foreground, true);
+        message.setGravity(Gravity.CENTER);
+        empty.addView(message, new LinearLayout.LayoutParams(-1, dp(32)));
+
+        TextView hint = text("Read, arrange, extract and share pages.\nEverything stays on your device.",
+            13, colors.mutedText, false);
+        hint.setGravity(Gravity.CENTER);
+        hint.setTextAlignment(View.TEXT_ALIGNMENT_CENTER);
+        hint.setLineSpacing(dp(3), 1f);
+        LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
+        hintParams.topMargin = dp(7);
+        hintParams.bottomMargin = dp(20);
+        empty.addView(hint, hintParams);
+
+        Button openEmpty = button("Choose a document", v -> chooseDocument());
+        primary(openEmpty);
+        empty.addView(openEmpty, new LinearLayout.LayoutParams(-2, dp(46)));
+        emptyView = empty;
         content.addView(emptyView, new FrameLayout.LayoutParams(-1, -1));
 
-        HorizontalScrollView scroll = new HorizontalScrollView(this);
-        scroll.setHorizontalScrollBarEnabled(false);
-        scroll.setBackgroundColor(Color.WHITE);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, dp(67)));
+        View dividerBottom = new View(this);
+        dividerBottom.setBackgroundColor(colors.stroke);
+        root.addView(dividerBottom, new LinearLayout.LayoutParams(-1, dp(1)));
+
+        LinearLayout footer = new LinearLayout(this);
+        footer.setOrientation(LinearLayout.VERTICAL);
+        footer.setBackgroundColor(colors.surface);
+        root.addView(footer, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout navigation = new LinearLayout(this);
+        navigation.setGravity(Gravity.CENTER_VERTICAL);
+        navigation.setPadding(dp(16), dp(9), dp(9), dp(6));
+        footer.addView(navigation, new LinearLayout.LayoutParams(-1, dp(55)));
+
+        LinearLayout pageInfo = new LinearLayout(this);
+        pageInfo.setGravity(Gravity.CENTER_VERTICAL);
+        pageInfo.setOrientation(LinearLayout.VERTICAL);
+        navigation.addView(pageInfo, new LinearLayout.LayoutParams(0, -1, 1));
+
+        TextView pageCaption = text("DOCUMENT", 10, colors.mutedText, true);
+        pageCaption.setLetterSpacing(.1f);
+        pageInfo.addView(pageCaption, new LinearLayout.LayoutParams(-1, dp(17)));
+
+        pageLabel = text("Page — of —", 14, colors.foreground, true);
+        pageLabel.setOnClickListener(v -> showPages());
+        pageLabel.setContentDescription("Choose a page");
+        pageInfo.addView(pageLabel, new LinearLayout.LayoutParams(-1, dp(25)));
+
+        Button previous = documentButton("‹", v -> navigate(-1));
+        previous.setTextSize(25);
+        quiet(previous);
+        addButton(navigation, previous);
+
+        Button next = documentButton("›", v -> navigate(1));
+        next.setTextSize(25);
+        quiet(next);
+        navigation.addView(next, new LinearLayout.LayoutParams(-2, dp(40)));
+
+        HorizontalScrollView toolbarScroll = new HorizontalScrollView(this);
+        toolbarScroll.setHorizontalScrollBarEnabled(false);
+        footer.addView(toolbarScroll, new LinearLayout.LayoutParams(-1, dp(57)));
+
         LinearLayout actions = new LinearLayout(this);
         actions.setGravity(Gravity.CENTER_VERTICAL);
-        actions.setPadding(dp(12), dp(10), dp(5), dp(12));
-        scroll.addView(actions, new HorizontalScrollView.LayoutParams(-2, -1));
-        addButton(actions, button("‹", v -> navigate(-1)));
-        pageLabel = new TextView(this);
-        pageLabel.setGravity(Gravity.CENTER);
-        pageLabel.setTextColor(INK);
-        pageLabel.setTextSize(13);
-        pageLabel.setMinWidth(dp(65));
-        pageLabel.setOnClickListener(v -> showPages());
-        actions.addView(pageLabel, new LinearLayout.LayoutParams(-2, dp(40)));
-        addButton(actions, button("›", v -> navigate(1)));
-        addButton(actions, button("Pages", v -> showPages()));
-        addButton(actions, button("Move to…", v -> movePage()));
-        addButton(actions, button("Extract", v -> extractPages()));
-        addButton(actions, button("Remove", v -> removeCurrentPage()));
-        addButton(actions, button("Reset", v -> resetPages()));
+        actions.setPadding(dp(16), 0, dp(9), dp(14));
+        toolbarScroll.addView(actions, new HorizontalScrollView.LayoutParams(-2, -1));
+
+        addButton(actions, documentButton("Pages", v -> showPages()));
+        addButton(actions, documentButton("Move", v -> movePage()));
+        addButton(actions, documentButton("Extract", v -> extractPages()));
+
+        Button remove = documentButton("Remove", v -> removeCurrentPage());
+        remove.setTextColor(colors.error);
+        addButton(actions, remove);
+
+        Button reset = documentButton("Reset", v -> resetPages());
+        addButton(actions, reset);
         refreshUI();
     }
 
@@ -204,15 +322,21 @@ public class MainActivity extends Activity {
 
     private void refreshUI() {
         boolean has = renderer != null && !pageOrder.isEmpty();
-        saveButton.setEnabled(has && !busy);
-        shareButton.setEnabled(has && !busy);
+        boolean enabled = has && !busy;
+        saveButton.setEnabled(enabled);
+        shareButton.setEnabled(enabled);
         openButton.setEnabled(!busy);
-        saveButton.setAlpha(has && !busy ? 1f : .4f);
-        shareButton.setAlpha(has && !busy ? 1f : .4f);
-        fileLabel.setText(has ? documentName : "PDF");
+        saveButton.setAlpha(enabled ? 1f : .38f);
+        shareButton.setAlpha(enabled ? 1f : .38f);
+        for (Button action : documentButtons) {
+            action.setEnabled(enabled);
+            action.setAlpha(enabled ? 1f : .40f);
+        }
+        fileLabel.setText(has ? documentName : "No document selected");
         pageLabel.setText(has
-            ? (pageIndex + 1) + " / " + pageOrder.size()
-            : "— / —");
+            ? "Page " + (pageIndex + 1) + " of " + pageOrder.size() + "   ▾"
+            : "Page — of —");
+
     }
 
     private void setBusy(boolean value) {
@@ -543,6 +667,26 @@ public class MainActivity extends Activity {
 
     private void toast(String message) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+    }
+
+    private boolean validOrder(ArrayList<Integer> order) {
+        if (renderer == null || order == null || order.isEmpty()
+            || order.size() > renderer.getPageCount()) return false;
+        java.util.HashSet<Integer> seen = new java.util.HashSet<>();
+        for (Integer value : order) {
+            if (value == null || value < 0 || value >= renderer.getPageCount()
+                || !seen.add(value)) return false;
+        }
+        return true;
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        if (sourceUri != null && renderer != null) {
+            state.putString("open_uri", sourceUri.toString());
+            state.putIntegerArrayList("page_order", new ArrayList<>(pageOrder));
+            state.putInt("page_index", pageIndex);
+        }
     }
 
     @Override public void onConfigurationChanged(Configuration config) {
