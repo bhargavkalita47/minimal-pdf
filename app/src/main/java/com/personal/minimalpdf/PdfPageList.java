@@ -1,5 +1,6 @@
 package com.personal.minimalpdf;
 
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -12,6 +13,7 @@ import android.view.MotionEvent;
 import android.view.GestureDetector;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.animation.DecelerateInterpolator;
 
 
 import androidx.recyclerview.widget.LinearLayoutManager;
@@ -53,6 +55,11 @@ public final class PdfPageList extends RecyclerView {
     private PdfRenderer pdf;
     private volatile int generation = 0;
     private float zoom = 1f;
+    private float desiredZoom = 1f;
+    private float zoomFocusX, zoomFocusY;
+    private boolean zoomFrameScheduled;
+    private ValueAnimator zoomAnimation;
+    private Runnable pendingHorizontalMove;
 
     public PdfPageList(Context context, ZoomScrollView pan, PageListener listener) {
         super(context);
@@ -64,9 +71,15 @@ public final class PdfPageList extends RecyclerView {
         setOverScrollMode(OVER_SCROLL_IF_CONTENT_SCROLLS);
         setItemAnimator(null);
         setHasFixedSize(false);
+        setClipToPadding(false);
+        setPadding(0, dp(70), 0, dp(125));
+        setItemViewCacheSize(3);
         setBackgroundColor(Color.rgb(229, 231, 235));
         // The item widths change during zoom. RecyclerView recycles rows as we scroll.
-        pan.setPinchListener((scale, focusX) -> zoomBy(scale, focusX));
+        pan.setPinchListener((scale, focusX, focusY) -> {
+            if (zoomAnimation != null) zoomAnimation.cancel();
+            requestZoom(desiredZoom * scale, focusX, focusY);
+        });
         addOnScrollListener(new OnScrollListener() {
             @Override public void onScrolled(RecyclerView view, int dx, int dy) {
                 notifyVisiblePage();
@@ -130,38 +143,97 @@ public final class PdfPageList extends RecyclerView {
         listener.onVisiblePageChanged(index);
     }
 
-    public float getZoom() { return zoom; }
+    public float getZoom() { return desiredZoom; }
 
-    public void resetZoom() { setZoom(1f); }
-
-    public void setZoom(float level) {
-        updateZoom(level, pan.getWidth() / 2f);
-    }
-
-    private void zoomBy(float multiplier, float focus) {
-        updateZoom(zoom * multiplier, focus);
-    }
-
-    private void updateZoom(float requested, float focus) {
-        if (pan.getWidth() <= 0) {
-            zoom = Math.max(1f, Math.min(4f, requested));
-            return;
+    public void resetZoom() {
+        if (zoomAnimation != null) zoomAnimation.cancel();
+        desiredZoom = zoom = 1f;
+        zoomFrameScheduled = false;
+        ViewGroup.LayoutParams params = getLayoutParams();
+        if (params != null) {
+            params.width = ViewGroup.LayoutParams.MATCH_PARENT;
+            setLayoutParams(params);
         }
-        float next = Math.max(1f, Math.min(4f, requested));
-        float oldWidth = Math.max(1f, pan.getWidth() * zoom);
-        float contentFocusFraction = (pan.getScrollX() + focus) / oldWidth;
+        if (pendingHorizontalMove != null) pan.removeCallbacks(pendingHorizontalMove);
+        pan.postOnAnimation(() -> pan.scrollTo(0, 0));
+        listener.onZoomChanged(1f);
+    }
+
+    /** Presets animate, but direct pinch changes apply at most once per frame. */
+    public void setZoom(float level) {
+        if (zoomAnimation != null) zoomAnimation.cancel();
+        final float from = desiredZoom;
+        final float target = Math.max(1f, Math.min(4f, level));
+        if (Math.abs(from - target) < .001f) return;
+        zoomAnimation = ValueAnimator.ofFloat(from, target);
+        zoomAnimation.setDuration(175L);
+        zoomAnimation.setInterpolator(new DecelerateInterpolator(1.2f));
+        zoomAnimation.addUpdateListener(animation ->
+            requestZoom((float) animation.getAnimatedValue(),
+                pan.getWidth() / 2f, getHeight() / 2f));
+        zoomAnimation.start();
+    }
+
+    private void requestZoom(float level, float focusX, float focusY) {
+        if (pageOrder.isEmpty()) return;
+        desiredZoom = Math.max(1f, Math.min(4f, level));
+        zoomFocusX = focusX;
+        zoomFocusY = focusY;
+        if (zoomFrameScheduled) return;
+        zoomFrameScheduled = true;
+        postOnAnimation(() -> {
+            zoomFrameScheduled = false;
+            applyZoomFrame();
+        });
+    }
+
+    private void applyZoomFrame() {
+        if (pan.getWidth() <= 0 || Math.abs(desiredZoom - zoom) < .001f) return;
+        float beforeZoom = zoom;
+        float next = desiredZoom;
+        float factor = next / Math.max(.001f, beforeZoom);
+        float focusX = zoomFocusX, focusY = zoomFocusY;
+
+        int anchor = layout.findFirstVisibleItemPosition();
+        int last = layout.findLastVisibleItemPosition();
+        if (anchor == NO_POSITION) anchor = 0;
+        for (int i = anchor; i <= last; i++) {
+            View item = layout.findViewByPosition(i);
+            if (item != null && item.getTop() <= focusY && item.getBottom() >= focusY) {
+                anchor = i;
+                break;
+            }
+        }
+        View anchorView = layout.findViewByPosition(anchor);
+        float newTop = anchorView == null
+            ? 0f : focusY + (anchorView.getTop() - focusY) * factor;
+
+        float previousWidth = pan.getWidth() * beforeZoom;
+        float fraction = (pan.getScrollX() + focusX) / Math.max(1f, previousWidth);
         zoom = next;
+
         ViewGroup.LayoutParams params = getLayoutParams();
         if (params == null) return;
         params.width = Math.max(pan.getWidth(), Math.round(pan.getWidth() * zoom));
         setLayoutParams(params);
-        post(() -> pan.scrollTo(
-            Math.max(0, Math.round(contentFocusFraction * getWidth() - focus)), 0));
+        // Preserve the reading position instead of jumping back to the top.
+        if (anchorView != null && anchor >= 0 && anchor < pageOrder.size()) {
+            layout.scrollToPositionWithOffset(anchor,
+                Math.round(newTop - getPaddingTop()));
+        }
+
+        final int horizontal = Math.max(0,
+            Math.round(fraction * pan.getWidth() * zoom - focusX));
+        if (pendingHorizontalMove != null) pan.removeCallbacks(pendingHorizontalMove);
+        pendingHorizontalMove = () -> pan.scrollTo(horizontal, 0);
+        pan.postOnAnimation(pendingHorizontalMove);
         listener.onZoomChanged(zoom);
     }
 
     public void dispose() {
         clearDocument();
+        if (zoomAnimation != null) zoomAnimation.cancel();
+        if (pendingHorizontalMove != null) pan.removeCallbacks(pendingHorizontalMove);
         renderQueue.shutdownNow();
     }
 
