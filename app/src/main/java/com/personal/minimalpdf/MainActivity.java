@@ -74,6 +74,7 @@ public class MainActivity extends Activity {
     private TextView focusPageTitle;
     private int focusedPosition = -1;
     private boolean focusedBitmapReady;
+    private Bitmap pendingFocusSwap;
     private Button focusZoomButton;
     private View focusToolbar;
     private TextView focusLoading;
@@ -961,6 +962,16 @@ public class MainActivity extends Activity {
      * then cross-slide by a few pixels without rebuilding the focus overlay. */
     private void renderFocusedPage(int position, int direction) {
         if (focusOverlay == null || position < 0 || position >= pageOrder.size()) return;
+        // Cancel a pending cross-slide without leaking its not-yet-displayed bitmap.
+        if (pendingFocusSwap != null) {
+            if (!pendingFocusSwap.isRecycled()) pendingFocusSwap.recycle();
+            pendingFocusSwap = null;
+        }
+        if (focusPage != null && focusedBitmapReady) {
+            focusPage.animate().cancel();
+            focusPage.setTranslationX(0f);
+            focusPage.setAlpha(1f);
+        }
         focusedPosition = position;
         if (focusPageTitle != null)
             focusPageTitle.setText("Page " + (position + 1) + " of " + pageOrder.size());
@@ -1014,13 +1025,16 @@ public class MainActivity extends Activity {
                     current.animateToZoom(1.5f);
                 } else {
                     current.animate().cancel();
+                    pendingFocusSwap = result;
                     current.animate().alpha(.58f)
                         .translationX(-direction * dp(20)).setDuration(90)
                         .withEndAction(() -> {
-                            if (focusPage != current || request != focusGeneration) {
-                                result.recycle();
+                            if (focusPage != current || request != focusGeneration ||
+                                pendingFocusSwap != result) {
+                                if (!result.isRecycled()) result.recycle();
                                 return;
                             }
+                            pendingFocusSwap = null;
                             if (focusLoading != null) focusLoading.setVisibility(View.GONE);
                             current.setBitmap(result);
                             current.setTranslationX(direction * dp(22));
@@ -1039,6 +1053,11 @@ public class MainActivity extends Activity {
 
     private void closeFocus(boolean animate) {
         focusGeneration++;
+        if (pendingFocusSwap != null) {
+            if (!pendingFocusSwap.isRecycled()) pendingFocusSwap.recycle();
+            pendingFocusSwap = null;
+        }
+        if (focusPage != null) focusPage.animate().cancel();
         final FrameLayout overlay = focusOverlay;
         final FocusPageView page = focusPage;
         focusOverlay = null;
