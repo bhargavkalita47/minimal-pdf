@@ -83,8 +83,11 @@ public class MainActivity extends Activity {
     private ReaderIcon saveButton;
     private ReaderIcon shareButton;
     private ReaderIcon openButton;
-    private TextView pageBadge;
-    private Runnable badgeFade;
+    private PageScrubber pageScrubber;
+    private TextView documentSelector;
+    private TextView pageSelector;
+    private FrameLayout wheelOverlay;
+    private PickerWheel pickerWheel;
     private int barBackground, barForeground, barMuted;
     private boolean busy = false;
 
@@ -262,16 +265,19 @@ public class MainActivity extends Activity {
         emptyView = empty;
         content.addView(empty, new FrameLayout.LayoutParams(-1, -1));
 
-        pageBadge = text("1", 16, barForeground, true);
-        pageBadge.setGravity(Gravity.CENTER);
-        pageBadge.setBackground(colors.rounded(this, barBackground, Color.TRANSPARENT, 24));
-        pageBadge.setAlpha(0f);
-        pageBadge.setVisibility(View.GONE);
-        pageBadge.setOnClickListener(view -> showPages());
-        FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
-            dp(51), dp(54), Gravity.END | Gravity.CENTER_VERTICAL);
-        badgeParams.rightMargin = -dp(10);
-        host.addView(pageBadge, badgeParams);
+        pageScrubber = new PageScrubber(this, position -> {
+            if (renderer == null || busy || position < 0 || position >= pageOrder.size()) return;
+            if (pageIndex == position) return;
+            pageIndex = position;
+            pdfPages.scrollToPage(position);
+            refreshUI();
+        });
+        pageScrubber.setPage(0, 0);
+        FrameLayout.LayoutParams scrubParams = new FrameLayout.LayoutParams(
+            dp(65), -1, Gravity.END);
+        scrubParams.topMargin = dp(67);
+        scrubParams.bottomMargin = dp(121);
+        host.addView(pageScrubber, scrubParams);
 
         // Fixed overlays: hiding controls never resizes the document viewport.
         LinearLayout header = new LinearLayout(this);
@@ -323,35 +329,35 @@ public class MainActivity extends Activity {
 
         LinearLayout paging = new LinearLayout(this);
         paging.setGravity(Gravity.CENTER_VERTICAL);
-        paging.setPadding(dp(12), dp(1), dp(12), 0);
+        paging.setPadding(dp(13), dp(1), dp(12), 0);
         footer.addView(paging, new LinearLayout.LayoutParams(-1, dp(43)));
-        ReaderIcon previous = iconButton(ReaderIcon.PREVIOUS, "Previous page",
-            view -> navigate(-1));
-        documentButtons.add(previous);
-        paging.addView(previous, new LinearLayout.LayoutParams(dp(42), dp(40)));
 
-        TextView current = text("1 / 1", 12, barMuted, true);
-        current.setGravity(Gravity.CENTER);
-        current.setOnClickListener(view -> showPages());
-        // Keep a secondary display of page position alongside the fixed badge.
-        paging.addView(current, new LinearLayout.LayoutParams(dp(69), dp(40)));
-        current.setTag("page-counter");
+        // Similar to the stock/timeframe selector in the provided reference.
+        // Each compact target opens its own vertical flick-to-select wheel.
+        documentSelector = text("Choose PDF ▾", 13, barForeground, true);
+        documentSelector.setSingleLine(true);
+        documentSelector.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        documentSelector.setContentDescription("Choose loaded PDF");
+        documentSelector.setOnClickListener(view -> showWheel(false));
+        paging.addView(documentSelector, new LinearLayout.LayoutParams(0, dp(42), 1));
 
-        ReaderIcon next = iconButton(ReaderIcon.NEXT, "Next page",
-            view -> navigate(1));
-        documentButtons.add(next);
-        paging.addView(next, new LinearLayout.LayoutParams(dp(42), dp(40)));
-
-        View space = new View(this);
-        paging.addView(space, new LinearLayout.LayoutParams(0, 1, 1));
+        pageSelector = text("— / — ▾", 12, barForeground, true);
+        pageSelector.setSingleLine(true);
+        pageSelector.setGravity(Gravity.CENTER);
+        pageSelector.setContentDescription("Scroll to select a page");
+        pageSelector.setOnClickListener(view -> showWheel(true));
+        LinearLayout.LayoutParams pageParams = new LinearLayout.LayoutParams(dp(100), dp(42));
+        pageParams.leftMargin = dp(4);
+        paging.addView(pageSelector, pageParams);
 
         zoomButton = button("100% ▾", view -> chooseZoom(false));
-        zoomButton.setTextColor(barForeground);
-        zoomButton.setTextSize(13);
+        zoomButton.setTextColor(barMuted);
+        zoomButton.setTextSize(12);
+        zoomButton.setPadding(dp(2), 0, dp(2), 0);
         zoomButton.setBackground(colors.rounded(this, Color.TRANSPARENT,
             Color.TRANSPARENT, 8));
         documentButtons.add(zoomButton);
-        paging.addView(zoomButton, new LinearLayout.LayoutParams(dp(85), dp(40)));
+        paging.addView(zoomButton, new LinearLayout.LayoutParams(dp(78), dp(40)));
 
         View rule = new View(this);
         rule.setBackgroundColor(Color.rgb(62, 64, 69));
@@ -400,7 +406,9 @@ public class MainActivity extends Activity {
         android.widget.PopupMenu popup = new android.widget.PopupMenu(this, anchor);
         popup.getMenu().add(0, 1, 0, "Save edited copy");
         popup.getMenu().add(0, 2, 1, "Reset page order");
-        popup.getMenu().add(0, 3, 2, "Open another PDF");
+        popup.getMenu().add(0, 3, 2, "Add more PDFs");
+        popup.getMenu().add(0, 4, 3, "Switch PDF");
+        popup.getMenu().add(0, 5, 4, "Close all documents");
         popup.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
                 case 1:
@@ -412,56 +420,139 @@ public class MainActivity extends Activity {
                 case 3:
                     chooseDocument();
                     return true;
+                case 4:
+                    showWheel(false);
+                    return true;
+                case 5:
+                    closeAllDocuments();
+                    return true;
             }
             return false;
         });
         popup.show();
     }
 
+    private String shortName(String name) {
+        if (name == null) return "PDF";
+        if (name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf"))
+            return name.substring(0, name.length() - 4);
+        return name;
+    }
+
     private void updatePageCounter() {
-        if (pageBadge == null || pageLabel == null) return;
         boolean has = renderer != null && !pageOrder.isEmpty();
-        pageBadge.setVisibility(has ? View.VISIBLE : View.GONE);
-        pageBadge.setText(has ? String.valueOf(pageIndex + 1) : "");
-        pageLabel.setText(has
-            ? (pageIndex + 1) + " / " + pageOrder.size() + " pages"
-            : "Open a document");
-        if (footerView instanceof LinearLayout) {
-            LinearLayout footer = (LinearLayout)footerView;
-            LinearLayout paging = (LinearLayout)footer.getChildAt(0);
-            for (int i = 0; i < paging.getChildCount(); i++) {
-                View child = paging.getChildAt(i);
-                if ("page-counter".equals(child.getTag()) && child instanceof TextView) {
-                    ((TextView)child).setText(has
-                        ? (pageIndex + 1) + " / " + pageOrder.size() : "— / —");
-                    break;
-                }
-            }
+        if (pageScrubber != null)
+            pageScrubber.setPage(has ? pageIndex : 0, has ? pageOrder.size() : 0);
+        if (pageLabel != null)
+            pageLabel.setText(has
+                ? documents.size() + (documents.size() == 1 ? " document" : " documents")
+                    + " · " + pageOrder.size() + " pages"
+                : "Open documents");
+        if (documentSelector != null) {
+            documentSelector.setText(has ? shortName(documentName) + "  ▾" : "Choose PDF ▾");
+            documentSelector.setEnabled(has);
+        }
+        if (pageSelector != null) {
+            pageSelector.setText(has
+                ? (pageIndex + 1) + " / " + pageOrder.size() + "  ▾"
+                : "— / —");
+            pageSelector.setEnabled(has);
         }
     }
 
     private void showPageBadge() {
-        if (pageBadge == null || renderer == null || !chromeVisible) return;
-        pageBadge.setVisibility(View.VISIBLE);
-        pageBadge.animate().cancel();
-        pageBadge.animate().alpha(1f).setDuration(90).start();
-        if (badgeFade != null) pageBadge.removeCallbacks(badgeFade);
-        badgeFade = () -> {
-            if (pageBadge != null) pageBadge.animate().alpha(0f)
-                .setDuration(200).start();
-        };
-        pageBadge.postDelayed(badgeFade, 1300);
+        // Kept as a compatibility point for navigation callbacks.
+        updatePageCounter();
+    }
+
+    private void dismissWheel() {
+        if (wheelOverlay != null) {
+            FrameLayout shown = wheelOverlay;
+            wheelOverlay = null;
+            pickerWheel = null;
+            shown.animate().cancel();
+            shown.animate().alpha(0f).setDuration(130)
+                .withEndAction(() -> {
+                    if (host != null && shown.getParent() == host) host.removeView(shown);
+                }).start();
+        }
+    }
+
+    private void showWheel(boolean pages) {
+        if (!ready()) return;
+        dismissWheel();
+
+        ArrayList<String> items = new ArrayList<>();
+        if (pages) {
+            for (int i = 0; i < pageOrder.size(); i++)
+                items.add("Page " + (i + 1));
+        } else {
+            for (DocumentSession session : documents)
+                items.add(shortName(session.name));
+        }
+        if (items.isEmpty()) return;
+
+        FrameLayout overlay = new FrameLayout(this);
+        wheelOverlay = overlay;
+        overlay.setBackgroundColor(Color.argb(78, 0, 0, 0));
+        overlay.setOnClickListener(view -> dismissWheel());
+        overlay.setAlpha(0f);
+        host.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(colors.rounded(this, Color.rgb(26, 29, 33),
+            Color.TRANSPARENT, 18));
+        card.setClickable(true);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+            dp(292), dp(376), Gravity.BOTTOM | Gravity.START);
+        params.leftMargin = dp(15);
+        params.bottomMargin = dp(116);
+        overlay.addView(card, params);
+
+        TextView heading = text(pages ? "PAGES" : "OPEN DOCUMENTS", 11,
+            Color.rgb(170, 177, 187), true);
+        heading.setLetterSpacing(.09f);
+        heading.setPadding(dp(22), 0, 0, 0);
+        card.addView(heading, new LinearLayout.LayoutParams(-1, dp(35)));
+
+        PickerWheel wheel = new PickerWheel(this, items,
+            pages ? pageIndex : Math.max(0, activeDocument), selected -> {
+                if (wheelOverlay != overlay) return;
+                if (pages) {
+                    if (renderer != null && selected >= 0 && selected < pageOrder.size()) {
+                        pageIndex = selected;
+                        pdfPages.scrollToPage(selected);
+                        refreshUI();
+                    }
+                } else {
+                    switchDocument(selected);
+                }
+            });
+        pickerWheel = wheel;
+        card.addView(wheel, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        TextView hint = text(pages ? "Scroll to jump to a page" :
+            "Scroll to switch PDFs", 12, Color.rgb(157, 164, 176), false);
+        hint.setGravity(Gravity.CENTER);
+        card.addView(hint, new LinearLayout.LayoutParams(-1, dp(36)));
+
+        if (!pages) {
+            TextView add = text("+ Add more PDFs", 13, Color.rgb(169, 198, 255), true);
+            add.setGravity(Gravity.CENTER);
+            add.setOnClickListener(view -> {
+                dismissWheel();
+                chooseDocument();
+            });
+            card.addView(add, new LinearLayout.LayoutParams(-1, dp(43)));
+        }
+        overlay.animate().alpha(1f).setDuration(150).start();
     }
 
     private void applyChrome() {
         animateBar(headerView, chromeVisible, true);
         animateBar(footerView, chromeVisible, false);
-        if (pageBadge != null && !chromeVisible) {
-            pageBadge.animate().cancel();
-            pageBadge.animate().alpha(0f).setDuration(130).start();
-        } else if (chromeVisible) {
-            showPageBadge();
-        }
+
     }
 
     private void animateBar(View bar, boolean show, boolean top) {
