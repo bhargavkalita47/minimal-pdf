@@ -140,6 +140,20 @@ public final class PickerWheel extends View {
         settle.start();
     }
 
+    /** Supports a drag that begins on the collapsed bottom-left selector. */
+    public void beginExternalDrag() {
+        if (settle != null) settle.cancel();
+    }
+
+    public void dragExternal(float deltaY) {
+        setPosition(position - deltaY / row);
+    }
+
+    public void endExternalDrag(float velocityY) {
+        float momentum = Math.max(-5f, Math.min(5f, -velocityY / (row * 8f)));
+        settleAt(Math.round(position + momentum), true);
+    }
+
     @Override public boolean onTouchEvent(MotionEvent event) {
         if (labels.isEmpty()) return false;
         switch (event.getActionMasked()) {
