@@ -75,6 +75,7 @@ public class MainActivity extends Activity {
 
     private static final String LIBRARY_PREF = "minimal_pdf_library_v2";
     private final ArrayList<DocumentSession> documents = new ArrayList<>();
+    private final ArrayList<DocumentSession> recentDocuments = new ArrayList<>();
     private boolean restoringLibrary;
     private volatile int searchGeneration;
     private final ExecutorService indexWorker = Executors.newSingleThreadExecutor();
@@ -718,6 +719,7 @@ public class MainActivity extends Activity {
         saveActiveSession();
         boolean closingActive = index == activeDocument;
         if (closingActive) closeDocument();
+        addToRecent(documents.get(index));
         documents.remove(index);
         if (closingActive) {
             activeDocument = -1;
@@ -799,6 +801,25 @@ public class MainActivity extends Activity {
             });
             close.setContentDescription("Close " + session.name);
             row.addView(close, new LinearLayout.LayoutParams(dp(38), dp(45)));
+        }
+        if (!recentDocuments.isEmpty()) {
+            TextView heading = text("RECENTLY CLOSED", 11, colors.mutedText, true);
+            heading.setPadding(0, dp(14), 0, dp(7));
+            list.addView(heading);
+            for (DocumentSession recent : new ArrayList<>(recentDocuments)) {
+                TextView name = text(shortName(recent.name) + "  ·  Page " +
+                    (recent.page + 1) + "    ↗", 13, colors.foreground, false);
+                name.setGravity(Gravity.CENTER_VERTICAL);
+                name.setPadding(dp(6), dp(4), dp(6), dp(4));
+                list.addView(name, new LinearLayout.LayoutParams(-1, dp(47)));
+                name.setOnClickListener(view -> {
+                    recentDocuments.remove(recent);
+                    documents.add(recent);
+                    scheduleLibrarySave();
+                    dialog.dismiss();
+                    switchDocument(documents.size() - 1);
+                });
+            }
         }
         dialog.show();
     }
@@ -1335,7 +1356,13 @@ public class MainActivity extends Activity {
             if (existing >= 0) {
                 if (firstNew < 0) firstNew = existing;
             } else {
-                documents.add(new DocumentSession(uri, getDocumentName(uri)));
+                DocumentSession previous = null;
+                for (DocumentSession item : recentDocuments) {
+                    if (item.uri.equals(uri)) { previous = item; break; }
+                }
+                if (previous != null) recentDocuments.remove(previous);
+                documents.add(previous == null ?
+                    new DocumentSession(uri, getDocumentName(uri)) : previous);
                 if (firstNew < 0) firstNew = documents.size() - 1;
             }
         }
@@ -1360,27 +1387,58 @@ public class MainActivity extends Activity {
         uiHandler.postDelayed(saveLibraryRunnable, 800);
     }
 
+    private void addToRecent(DocumentSession session) {
+        if (session == null) return;
+        recentDocuments.removeIf(item -> item.uri.equals(session.uri));
+        recentDocuments.add(0, session);
+        while (recentDocuments.size() > 12)
+            recentDocuments.remove(recentDocuments.size() - 1);
+        scheduleLibrarySave();
+    }
+
+    private JSONObject sessionJson(DocumentSession session) throws JSONException {
+        JSONObject item = new JSONObject();
+        item.put("uri", session.uri.toString());
+        item.put("name", session.name);
+        item.put("page", session.page);
+        item.put("progress", session.progress);
+        JSONArray order = new JSONArray();
+        for (Integer page : session.order) order.put(page);
+        item.put("order", order);
+        JSONArray marks = new JSONArray();
+        for (Integer page : session.bookmarks) marks.put(page);
+        item.put("bookmarks", marks);
+        return item;
+    }
+
+    private DocumentSession sessionFromJson(JSONObject entry) {
+        if (entry == null) return null;
+        String value = entry.optString("uri", "");
+        if (value.isEmpty()) return null;
+        DocumentSession session = new DocumentSession(
+            Uri.parse(value), entry.optString("name", "document.pdf"));
+        session.page = Math.max(0, entry.optInt("page", 0));
+        session.progress = (float)entry.optDouble("progress", session.page);
+        JSONArray order = entry.optJSONArray("order");
+        if (order != null)
+            for (int j = 0; j < order.length(); j++) session.order.add(order.optInt(j));
+        JSONArray marks = entry.optJSONArray("bookmarks");
+        if (marks != null)
+            for (int j = 0; j < marks.length(); j++) session.bookmarks.add(marks.optInt(j));
+        return session;
+    }
+
     private void persistLibrary() {
         if (restoringLibrary) return;
         try {
             JSONArray items = new JSONArray();
-            for (DocumentSession session : documents) {
-                JSONObject item = new JSONObject();
-                item.put("uri", session.uri.toString());
-                item.put("name", session.name);
-                item.put("page", session.page);
-                item.put("progress", session.progress);
-                JSONArray order = new JSONArray();
-                for (Integer page : session.order) order.put(page);
-                item.put("order", order);
-                JSONArray marks = new JSONArray();
-                for (Integer page : session.bookmarks) marks.put(page);
-                item.put("bookmarks", marks);
-                items.put(item);
-            }
+            for (DocumentSession session : documents) items.put(sessionJson(session));
+            JSONArray recent = new JSONArray();
+            for (DocumentSession session : recentDocuments) recent.put(sessionJson(session));
             JSONObject state = new JSONObject();
             state.put("active", activeDocument);
             state.put("documents", items);
+            state.put("recent", recent);
             getSharedPreferences(LIBRARY_PREF, MODE_PRIVATE).edit()
                 .putString("state", state.toString()).apply();
         } catch (JSONException ignored) { }
@@ -1396,23 +1454,15 @@ public class MainActivity extends Activity {
             JSONArray items = state.optJSONArray("documents");
             if (items == null) return;
             for (int i = 0; i < items.length(); i++) {
-                JSONObject entry = items.optJSONObject(i);
-                if (entry == null) continue;
-                String value = entry.optString("uri", "");
-                if (value.isEmpty()) continue;
-                DocumentSession session = new DocumentSession(
-                    Uri.parse(value), entry.optString("name", "document.pdf"));
-                session.page = Math.max(0, entry.optInt("page", 0));
-                session.progress = (float)entry.optDouble("progress", session.page);
-                JSONArray order = entry.optJSONArray("order");
-                if (order != null)
-                    for (int j = 0; j < order.length(); j++)
-                        session.order.add(order.optInt(j));
-                JSONArray marks = entry.optJSONArray("bookmarks");
-                if (marks != null)
-                    for (int j = 0; j < marks.length(); j++)
-                        session.bookmarks.add(marks.optInt(j));
-                documents.add(session);
+                DocumentSession session = sessionFromJson(items.optJSONObject(i));
+                if (session != null) documents.add(session);
+            }
+            JSONArray recent = state.optJSONArray("recent");
+            if (recent != null) {
+                for (int i = 0; i < recent.length(); i++) {
+                    DocumentSession session = sessionFromJson(recent.optJSONObject(i));
+                    if (session != null) recentDocuments.add(session);
+                }
             }
             if (!documents.isEmpty())
                 switchDocument(Math.max(0, Math.min(documents.size() - 1,
@@ -1741,6 +1791,8 @@ public class MainActivity extends Activity {
         cancelRequestedDocumentSwitch();
         dismissDragPreview(false);
         dismissWheel();
+        saveActiveSession();
+        for (DocumentSession item : documents) addToRecent(item);
         closeDocument();
         documents.clear();
         activeDocument = -1;
