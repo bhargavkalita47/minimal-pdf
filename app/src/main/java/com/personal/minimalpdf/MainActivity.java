@@ -69,7 +69,6 @@ public class MainActivity extends Activity {
     private FrameLayout host;
     private View headerView, footerView, topDivider, bottomDivider;
     private boolean chromeVisible = true;
-    private Button zoomButton;
     private FrameLayout focusOverlay;
     private FocusPageView focusPage;
     private Button focusZoomButton;
@@ -88,6 +87,17 @@ public class MainActivity extends Activity {
     private TextView pageSelector;
     private FrameLayout wheelOverlay;
     private PickerWheel pickerWheel;
+    private FrameLayout dragPreviewOverlay;
+    private PickerWheel dragPreviewWheel;
+    private Runnable dragPreviewHide;
+    private final android.os.Handler uiHandler =
+        new android.os.Handler(android.os.Looper.getMainLooper());
+    private final ExecutorService documentWorker = Executors.newSingleThreadExecutor();
+    private Runnable pendingDocumentSwitch;
+    private int requestedDocument = -1;
+    private int documentSwitchGeneration;
+    private boolean pageJumpQueued;
+    private int pendingPageJump;
     private boolean editMenuOpen;
     private FrameLayout editOverlay;
     private int barBackground, barForeground, barMuted;
@@ -221,8 +231,7 @@ public class MainActivity extends Activity {
         content.setBackgroundColor(colors.canvas);
         host.addView(content, new FrameLayout.LayoutParams(-1, -1));
 
-        ZoomScrollView pan = new ZoomScrollView(this);
-        pdfPages = new PdfPageList(this, pan, new PdfPageList.PageListener() {
+        pdfPages = new PdfPageList(this, new PdfPageList.PageListener() {
             @Override public void onVisiblePageChanged(int position) {
                 if (renderer != null && pageIndex != position) {
                     pageIndex = position;
@@ -232,13 +241,10 @@ public class MainActivity extends Activity {
             }
             @Override public void onSingleTap() { toggleChrome(); }
             @Override public void onDoubleTap(int position) { showFocus(position); }
-            @Override public void onZoomChanged(float zoom) {
-                if (zoomButton != null) zoomButton.setText(zoomTitle(zoom));
-            }
+            @Override public void onZoomChanged(float zoom) { /* Focus-only zoom. */ }
         });
         pdfPages.setBackgroundColor(colors.canvas);
-        pan.addView(pdfPages, new HorizontalScrollView.LayoutParams(-1, -1));
-        content.addView(pan, new FrameLayout.LayoutParams(-1, -1));
+        content.addView(pdfPages, new FrameLayout.LayoutParams(-1, -1));
 
         // A quiet empty state, consistent with the reader's dark toolbar.
         LinearLayout empty = new LinearLayout(this);
@@ -276,7 +282,7 @@ public class MainActivity extends Activity {
         });
         pageScrubber.setPage(0, 0);
         FrameLayout.LayoutParams scrubParams = new FrameLayout.LayoutParams(
-            dp(65), -1, Gravity.END);
+            dp(49), -1, Gravity.END);
         scrubParams.topMargin = dp(67);
         scrubParams.bottomMargin = dp(121);
         host.addView(pageScrubber, scrubParams);
@@ -354,15 +360,6 @@ public class MainActivity extends Activity {
         pageParams.leftMargin = dp(4);
         paging.addView(pageSelector, pageParams);
 
-        zoomButton = button("100% ▾", view -> chooseZoom(false));
-        zoomButton.setTextColor(barMuted);
-        zoomButton.setTextSize(12);
-        zoomButton.setPadding(dp(2), 0, dp(2), 0);
-        zoomButton.setBackground(colors.rounded(this, Color.TRANSPARENT,
-            Color.TRANSPARENT, 8));
-        documentButtons.add(zoomButton);
-        paging.addView(zoomButton, new LinearLayout.LayoutParams(dp(78), dp(40)));
-
         View rule = new View(this);
         rule.setBackgroundColor(Color.rgb(62, 64, 69));
         LinearLayout.LayoutParams ruleParams = new LinearLayout.LayoutParams(-1, dp(1));
@@ -376,7 +373,6 @@ public class MainActivity extends Activity {
         footer.addView(actions, new LinearLayout.LayoutParams(-1, dp(67)));
         addAction(actions, ReaderIcon.PAGES, "Pages", view -> showWheel(true));
         addAction(actions, ReaderIcon.OPEN, "PDFs", view -> showWheel(false));
-        addAction(actions, ReaderIcon.ZOOM, "Zoom", view -> chooseZoom(false));
         addAction(actions, ReaderIcon.SHARE, "Share", view ->
             sharePages(new ArrayList<>(pageOrder)));
         saveButton = addAction(actions, ReaderIcon.MOVE, "Edit", view -> showEditMenu());
@@ -472,56 +468,155 @@ public class MainActivity extends Activity {
 
     /** A vertical swipe directly on the bottom-left label opens the same wheel
      * and preselects the swiped-to item; tapping still opens the wheel normally. */
+    /** Direct selector drag: the wheel follows the finger while the actual
+     * page/PDF is updated continuously; the full menu opens on tap only. */
+    private void beginDragPreview(boolean pages, int startIndex) {
+        dismissDragPreview(false);
+        ArrayList<String> names = new ArrayList<>();
+        if (pages) {
+            for (int i = 0; i < pageOrder.size(); i++) names.add("Page " + (i + 1));
+        } else {
+            for (DocumentSession session : documents) names.add(shortName(session.name));
+        }
+        if (names.isEmpty()) return;
+
+        FrameLayout overlay = new FrameLayout(this);
+        dragPreviewOverlay = overlay;
+        overlay.setAlpha(0f);
+        overlay.setClickable(false);
+        host.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+
+        PickerWheel wheel = new PickerWheel(this, names, startIndex, selected -> { });
+        dragPreviewWheel = wheel;
+        wheel.setEnabled(false);
+        int width = Math.min(dp(276), getResources().getDisplayMetrics().widthPixels - dp(28));
+        int height = Math.min(dp(284), getResources().getDisplayMetrics().heightPixels - dp(185));
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+            width, Math.max(dp(150), height), Gravity.BOTTOM | Gravity.START);
+        params.leftMargin = dp(12);
+        params.bottomMargin = dp(113);
+        overlay.addView(wheel, params);
+        overlay.animate().alpha(1f).setDuration(105).start();
+    }
+
+    private void dismissDragPreview(boolean animate) {
+        if (dragPreviewHide != null) {
+            uiHandler.removeCallbacks(dragPreviewHide);
+            dragPreviewHide = null;
+        }
+        FrameLayout overlay = dragPreviewOverlay;
+        dragPreviewOverlay = null;
+        dragPreviewWheel = null;
+        if (overlay == null) return;
+        overlay.animate().cancel();
+        Runnable finish = () -> {
+            if (host != null && overlay.getParent() == host) host.removeView(overlay);
+        };
+        if (animate) {
+            overlay.animate().alpha(0f).setDuration(150)
+                .withEndAction(finish).start();
+        } else finish.run();
+    }
+
+    private void closeDragPreviewSoon(int selection) {
+        if (dragPreviewWheel != null) dragPreviewWheel.animateTo(selection);
+        if (dragPreviewHide != null) uiHandler.removeCallbacks(dragPreviewHide);
+        dragPreviewHide = () -> dismissDragPreview(true);
+        uiHandler.postDelayed(dragPreviewHide, 220);
+    }
+
+    private void jumpPageLive(int index) {
+        if (renderer == null || index < 0 || index >= pageOrder.size()) return;
+        pageIndex = index;
+        pendingPageJump = index;
+        if (pageSelector != null)
+            pageSelector.setText((index + 1) + " / " + pageOrder.size() + "  ▾");
+        if (pageScrubber != null) pageScrubber.setPage(index, pageOrder.size());
+        if (pageJumpQueued) return;
+        pageJumpQueued = true;
+        pdfPages.postOnAnimation(() -> {
+            pageJumpQueued = false;
+            if (renderer != null && pendingPageJump >= 0 &&
+                pendingPageJump < pageOrder.size()) {
+                pdfPages.scrollToPage(pendingPageJump);
+                refreshUI();
+            }
+        });
+    }
+
     private final class DirectWheelGesture implements View.OnTouchListener {
         private final boolean pages;
+        private final float threshold = dp(7);
+        private final float rowDistance = dp(34);
         private float startY;
         private boolean dragging;
         private int initial;
-        private int selection;
-        private final int threshold = dp(7);
+        private int lastSelection;
 
         DirectWheelGesture(boolean pages) { this.pages = pages; }
 
+        private int selectionAt(float rawY) {
+            int max = pages ? pageOrder.size() : documents.size();
+            if (max == 0) return 0;
+            return Math.max(0, Math.min(max - 1,
+                Math.round(initial + (startY - rawY) / rowDistance)));
+        }
+
+        private float progressAt(float rawY) {
+            int max = pages ? pageOrder.size() : documents.size();
+            return Math.max(0f, Math.min(Math.max(0, max - 1),
+                initial + (startY - rawY) / rowDistance));
+        }
+
+        private void updateSelection(int selection) {
+            if (selection == lastSelection) return;
+            lastSelection = selection;
+            if (pages) {
+                jumpPageLive(selection);
+            } else {
+                if (documentSelector != null)
+                    documentSelector.setText(shortName(documents.get(selection).name) + "  ▾");
+                requestDocumentSwitchLive(selection, false);
+            }
+        }
+
         @Override public boolean onTouch(View view, android.view.MotionEvent event) {
-            if (!ready()) return false;
+            if (!ready() || focusOverlay != null) return false;
             switch (event.getActionMasked()) {
                 case android.view.MotionEvent.ACTION_DOWN:
                     startY = event.getRawY();
                     initial = pages ? pageIndex : activeDocument;
-                    selection = initial;
+                    lastSelection = initial;
                     dragging = false;
                     return true;
                 case android.view.MotionEvent.ACTION_MOVE:
-                    float distance = startY - event.getRawY();
-                    if (Math.abs(distance) > threshold) dragging = true;
+                    if (!dragging && Math.abs(startY - event.getRawY()) > threshold) {
+                        dragging = true;
+                        beginDragPreview(pages, initial);
+                    }
                     if (dragging) {
-                        int max = pages ? pageOrder.size() : documents.size();
-                        selection = Math.max(0, Math.min(max - 1,
-                            initial + Math.round(distance / dp(28))));
-                        if (pages) {
-                            pageSelector.setText((selection + 1) + " / " + pageOrder.size() + " ▾");
-                        } else {
-                            documentSelector.setText(shortName(documents.get(selection).name) + " ▾");
-                        }
+                        if (dragPreviewWheel != null)
+                            dragPreviewWheel.followDrag(progressAt(event.getRawY()));
+                        updateSelection(selectionAt(event.getRawY()));
                     }
                     return true;
                 case android.view.MotionEvent.ACTION_UP:
                     if (dragging) {
-                        if (pages) {
-                            pageIndex = selection;
-                            pdfPages.scrollToPage(selection);
-                            refreshUI();
-                        } else {
-                            switchDocument(selection);
-                        }
-                        // Keep the wheel available for precise corrections.
-                        showWheel(pages);
+                        int selected = selectionAt(event.getRawY());
+                        updateSelection(selected);
+                        closeDragPreviewSoon(selected);
                     } else {
                         view.performClick();
                     }
+                    dragging = false;
                     return true;
                 case android.view.MotionEvent.ACTION_CANCEL:
-                    refreshUI();
+                    if (dragging) {
+                        if (pages) jumpPageLive(initial);
+                        else requestDocumentSwitchLive(initial, true);
+                        dismissDragPreview(true);
+                    }
+                    dragging = false;
                     return true;
             }
             return true;
@@ -606,6 +701,7 @@ public class MainActivity extends Activity {
 
     private void showWheel(boolean pages) {
         if (!ready()) return;
+        dismissDragPreview(false);
         dismissWheel();
 
         ArrayList<String> items = new ArrayList<>();
@@ -681,6 +777,7 @@ public class MainActivity extends Activity {
     }
 
     private void applyChrome() {
+        if (pageScrubber != null) pageScrubber.setChromeVisible(chromeVisible);
         animateBar(headerView, chromeVisible, true);
         animateBar(footerView, chromeVisible, false);
 
@@ -720,28 +817,22 @@ public class MainActivity extends Activity {
         return Math.round(zoom * 100) + "% ▾";
     }
 
+    /** Zoom remains available only when a single page is in focus mode. */
     private void chooseZoom(boolean focused) {
-        if (!ready() && !focused) return;
+        if (focusPage == null) return;
         String[] labels = new String[ZOOM_LEVELS.length];
-        float current = focused
-            ? (focusPage == null ? 1f : focusPage.getZoom())
-            : pdfPages.getZoom();
+        float current = focusPage.getZoom();
         int selected = 0;
         float closest = Float.MAX_VALUE;
         for (int i = 0; i < ZOOM_LEVELS.length; i++) {
             labels[i] = ZOOM_LEVELS[i] + "%";
-            float delta = Math.abs(current * 100f - ZOOM_LEVELS[i]);
-            if (delta < closest) { closest = delta; selected = i; }
+            float distance = Math.abs(current * 100f - ZOOM_LEVELS[i]);
+            if (distance < closest) { selected = i; closest = distance; }
         }
         new AlertDialog.Builder(this)
-            .setTitle("Zoom level")
+            .setTitle("Focus zoom")
             .setSingleChoiceItems(labels, selected, (dialog, index) -> {
-                float level = ZOOM_LEVELS[index] / 100f;
-                if (focused) {
-                    if (focusPage != null) focusPage.animateToZoom(level);
-                } else {
-                    pdfPages.setZoom(level);
-                }
+                if (focusPage != null) focusPage.animateToZoom(ZOOM_LEVELS[index] / 100f);
                 dialog.dismiss();
             })
             .setNegativeButton("Cancel", null)
@@ -872,7 +963,9 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (editOverlay != null) {
+        if (dragPreviewOverlay != null) {
+            dismissDragPreview(true);
+        } else if (editOverlay != null) {
             dismissEditMenu();
         } else if (wheelOverlay != null) {
             dismissWheel();
@@ -988,48 +1081,131 @@ public class MainActivity extends Activity {
         current.page = pageIndex;
     }
 
-    private void switchDocument(int position) {
-        if (busy || position < 0 || position >= documents.size()) return;
-        if (position == activeDocument && renderer != null) return;
-        DocumentSession chosen = documents.get(position);
-        try {
-            ParcelFileDescriptor descriptor =
-                getContentResolver().openFileDescriptor(chosen.uri, "r");
-            if (descriptor == null) throw new Exception("Could not read file");
-            PdfRenderer next;
-            try { next = new PdfRenderer(descriptor); }
-            catch (Exception error) { descriptor.close(); throw error; }
+    private void cancelRequestedDocumentSwitch() {
+        documentSwitchGeneration++;
+        if (pendingDocumentSwitch != null) {
+            uiHandler.removeCallbacks(pendingDocumentSwitch);
+            pendingDocumentSwitch = null;
+        }
+        requestedDocument = -1;
+    }
 
-            saveActiveSession();
-            closeDocument();
-            sourceFd = descriptor;
-            renderer = next;
-            sourceUri = chosen.uri;
-            documentName = chosen.name;
-            activeDocument = position;
-            pageOrder.clear();
-            if (validOrder(chosen.order)) {
-                pageOrder.addAll(chosen.order);
-            } else {
-                for (int i = 0; i < renderer.getPageCount(); i++) pageOrder.add(i);
-                chosen.order.clear();
-                chosen.order.addAll(pageOrder);
-                chosen.page = 0;
-            }
-            pageIndex = Math.max(0, Math.min(pageOrder.size() - 1, chosen.page));
-            pdfPages.setDocument(renderer, pageOrder);
-            pdfPages.scrollToPage(pageIndex);
-            if (emptyView != null) emptyView.setVisibility(View.GONE);
-            if (zoomButton != null) zoomButton.setText("100% ▾");
+    private void applyOpenedDocument(int position, ParcelFileDescriptor descriptor,
+                                     PdfRenderer opened) {
+        DocumentSession chosen = documents.get(position);
+        saveActiveSession();
+        closeDocument();
+        sourceFd = descriptor;
+        renderer = opened;
+        sourceUri = chosen.uri;
+        documentName = chosen.name;
+        activeDocument = position;
+        requestedDocument = -1;
+        pendingDocumentSwitch = null;
+
+        pageOrder.clear();
+        if (validOrder(chosen.order)) {
+            pageOrder.addAll(chosen.order);
+        } else {
+            for (int index = 0; index < renderer.getPageCount(); index++)
+                pageOrder.add(index);
+            chosen.order.clear();
+            chosen.order.addAll(pageOrder);
+            chosen.page = 0;
+        }
+        pageIndex = pageOrder.isEmpty() ? 0 :
+            Math.max(0, Math.min(pageOrder.size() - 1, chosen.page));
+        pdfPages.setDocument(renderer, pageOrder);
+        if (!pageOrder.isEmpty()) pdfPages.scrollToPage(pageIndex);
+        if (emptyView != null) emptyView.setVisibility(View.GONE);
+        if (!chromeVisible) {
             chromeVisible = true;
             applyChrome();
-            refreshUI();
+        }
+        refreshUI();
+    }
+
+    /** Normal tap selection may open immediately; finger-driven changes use
+     * background loading below to keep the UI thread free. */
+    private void switchDocument(int position) {
+        if (busy || position < 0 || position >= documents.size()) return;
+        cancelRequestedDocumentSwitch();
+        if (position == activeDocument && renderer != null) return;
+        try {
+            ParcelFileDescriptor descriptor =
+                getContentResolver().openFileDescriptor(documents.get(position).uri, "r");
+            if (descriptor == null) throw new Exception("Could not read file");
+            PdfRenderer opened;
+            try { opened = new PdfRenderer(descriptor); }
+            catch (Exception error) { descriptor.close(); throw error; }
+            applyOpenedDocument(position, descriptor, opened);
         } catch (Exception error) {
             toast("Could not open PDF: " + error.getMessage());
         }
     }
 
+    /** Keep the PDF name and wheel moving with the finger, while opening the
+     * requested PDF off-thread. Stale requests are discarded when scrubbing fast. */
+    private void requestDocumentSwitchLive(int position, boolean immediate) {
+        if (busy || position < 0 || position >= documents.size()) return;
+        if (position == activeDocument && renderer != null) {
+            cancelRequestedDocumentSwitch();
+            return;
+        }
+        if (requestedDocument == position) return;
+
+        cancelRequestedDocumentSwitch();
+        requestedDocument = position;
+        final int token = documentSwitchGeneration;
+        final Uri uri = documents.get(position).uri;
+        Runnable request = () -> {
+            pendingDocumentSwitch = null;
+            documentWorker.execute(() -> {
+                if (token != documentSwitchGeneration) return;
+                ParcelFileDescriptor descriptor = null;
+                PdfRenderer opened = null;
+                String error = null;
+                try {
+                    descriptor = getContentResolver().openFileDescriptor(uri, "r");
+                    if (descriptor == null) throw new Exception("Could not read file");
+                    opened = new PdfRenderer(descriptor);
+                } catch (Exception failure) {
+                    error = failure.getMessage();
+                    if (opened != null) { try { opened.close(); } catch (Exception ignored) { } }
+                    if (descriptor != null) { try { descriptor.close(); } catch (Exception ignored) { } }
+                    opened = null;
+                    descriptor = null;
+                }
+                final ParcelFileDescriptor readyDescriptor = descriptor;
+                final PdfRenderer readyRenderer = opened;
+                final String failureMessage = error;
+                runOnUiThread(() -> {
+                    if (token != documentSwitchGeneration || isFinishing() || isDestroyed()) {
+                        if (readyRenderer != null) {
+                            try { readyRenderer.close(); } catch (Exception ignored) { }
+                        }
+                        if (readyDescriptor != null) {
+                            try { readyDescriptor.close(); } catch (Exception ignored) { }
+                        }
+                        return;
+                    }
+                    if (readyDescriptor != null && readyRenderer != null) {
+                        applyOpenedDocument(position, readyDescriptor, readyRenderer);
+                    } else {
+                        requestedDocument = -1;
+                        refreshUI();
+                        toast("Could not open PDF: " + failureMessage);
+                    }
+                });
+            });
+        };
+        pendingDocumentSwitch = request;
+        uiHandler.postDelayed(request, immediate ? 0 : 55);
+    }
+
     private void closeAllDocuments() {
+        cancelRequestedDocumentSwitch();
+        dismissDragPreview(false);
         dismissWheel();
         closeDocument();
         documents.clear();
@@ -1336,11 +1512,12 @@ public class MainActivity extends Activity {
 
     @Override public void onConfigurationChanged(Configuration config) {
         super.onConfigurationChanged(config);
-        if (pdfPages != null) pdfPages.resetZoom();
-        if (zoomButton != null) zoomButton.setText("100% ▾");
     }
 
     @Override protected void onDestroy() {
+        cancelRequestedDocumentSwitch();
+        dismissDragPreview(false);
+        documentWorker.shutdownNow();
         if (editOverlay != null) {
             editOverlay.animate().cancel();
             host.removeView(editOverlay);

@@ -12,7 +12,10 @@ A minimal offline Android PDF reader and page organizer for personal use. No acc
 - Zoom with two fingers or choose 100%, 125%, 150%, 200%, 300%, or 400% in the zoom menu
 - Dark, full-width reader toolbars inspired by modern mobile PDF readers, with borderless line icons
 - Floating page scrubber: vertical position tracks the document progress and dragging jumps directly to a page
-- A bottom-left two-part selector for quick scrolling through loaded PDFs and pages, using an animated wheel with fading neighboring items
+- Drag directly on the bottom-left document or page label for an in-place, finger-tracking wheel that updates pages live and switches PDFs without blocking the UI thread
+- Tap those labels to open the full picker as before; dragging never opens the picker on release
+- The compact right-side page indicator animates between positions and fades when the reader controls hide, reappearing briefly as pages change
+- Normal continuous scrolling no longer supports zoom; pinch and zoom presets are available in focused single-page mode only
 - Import multiple PDFs in one picker action, switch between them, and retain each PDF's in-progress page ordering and reading position across switches
 - Fast 165–185 ms hide/show and focused-page transitions that do not resize the reading area
 - Normal continuous-reader pinch zoom coalesced to one layout update per animation frame, preserving the zoom focal point
