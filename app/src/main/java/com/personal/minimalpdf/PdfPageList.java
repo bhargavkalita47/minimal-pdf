@@ -19,6 +19,8 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -55,6 +57,7 @@ public final class PdfPageList extends RecyclerView {
     private volatile int generation = 0;
     private boolean restoringDocument;
     private float readingProgress;
+    private Map<Integer, List<RectF>> searchHighlights = new HashMap<>();
     public PdfPageList(Context context, PageListener listener) {
         super(context);
         this.listener = listener;
@@ -157,7 +160,13 @@ public final class PdfPageList extends RecyclerView {
         }
         inFlight.clear();
         bitmaps.evictAll();
+        searchHighlights.clear();
         pageOrder = new ArrayList<>();
+        adapter.notifyDataSetChanged();
+    }
+
+    public void setSearchHighlights(Map<Integer, List<RectF>> highlights) {
+        searchHighlights = highlights == null ? new HashMap<>() : highlights;
         adapter.notifyDataSetChanged();
     }
 
@@ -258,6 +267,7 @@ public final class PdfPageList extends RecyclerView {
             int original = pageOrder.get(position);
             Bitmap cached = bitmaps.get(original);
             holder.page.setBitmap(cached);
+            holder.page.setHighlights(searchHighlights.get(original));
             if (cached == null) loadPage(original);
         }
 
@@ -278,6 +288,8 @@ public final class PdfPageList extends RecyclerView {
         private static final float A4_ASPECT = 842f / 595f;
         private final Paint paper = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint imagePaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+        private final Paint highlightPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private List<RectF> highlights;
         private Bitmap bitmap;
         private GestureDetector taps;
         private float aspect = A4_ASPECT;
@@ -290,6 +302,7 @@ public final class PdfPageList extends RecyclerView {
             // Only a 1dp margin above and below: adjacent pages nearly touch.
             gutterY = Math.max(1, (int)(1f * density + .5f));
             paper.setColor(Color.WHITE);
+            highlightPaint.setColor(Color.argb(97, 255, 193, 54));
         }
 
         interface TapActions {
@@ -339,6 +352,11 @@ public final class PdfPageList extends RecyclerView {
             return true;
         }
 
+        void setHighlights(List<RectF> rectangles) {
+            highlights = rectangles;
+            invalidate();
+        }
+
         void setBitmap(Bitmap updated) {
             bitmap = updated;
             aspect = updated == null ? A4_ASPECT : (float)updated.getHeight() / updated.getWidth();
@@ -360,6 +378,15 @@ public final class PdfPageList extends RecyclerView {
             canvas.drawRect(bounds, paper);
             if (bitmap != null && !bitmap.isRecycled()) {
                 canvas.drawBitmap(bitmap, null, bounds, imagePaint);
+                if (highlights != null) {
+                    for (RectF r : highlights) {
+                        canvas.drawRect(
+                            bounds.left + bounds.width() * r.left,
+                            bounds.top + bounds.height() * r.top,
+                            bounds.left + bounds.width() * r.right,
+                            bounds.top + bounds.height() * r.bottom, highlightPaint);
+                    }
+                }
             }
         }
     }
