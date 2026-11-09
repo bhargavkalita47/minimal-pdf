@@ -92,6 +92,20 @@ public final class PdfPageList extends RecyclerView {
         return (int)(value * getResources().getDisplayMetrics().density + .5f);
     }
 
+    /**
+     * HorizontalScrollView measures its child with an UNSPECIFIED width spec,
+     * which can ignore a changed LayoutParams.width. Explicitly measure the
+     * RecyclerView at the zoomed width so page rows actually become wider.
+     */
+    @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        int viewport = pan.getWidth();
+        if (viewport > 0 && !pageOrder.isEmpty()) {
+            int target = Math.max(viewport, Math.round(viewport * zoom));
+            widthMeasureSpec = MeasureSpec.makeMeasureSpec(target, MeasureSpec.EXACTLY);
+        }
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+    }
+
     private void notifyVisiblePage() {
         if (adapter.getItemCount() == 0) return;
         int first = layout.findFirstVisibleItemPosition();
@@ -149,6 +163,7 @@ public final class PdfPageList extends RecyclerView {
         zoomFrameScheduled = false;
         ViewGroup.LayoutParams params = getLayoutParams();
         if (params != null) {
+            setMinimumWidth(0);
             params.width = ViewGroup.LayoutParams.MATCH_PARENT;
             setLayoutParams(params);
         }
@@ -219,7 +234,9 @@ public final class PdfPageList extends RecyclerView {
         ViewGroup.LayoutParams params = getLayoutParams();
         if (params == null) return;
         params.width = Math.max(pan.getWidth(), Math.round(pan.getWidth() * zoom));
+        setMinimumWidth(params.width);
         setLayoutParams(params);
+        requestLayout();
         // Preserve the reading position instead of jumping back to the top.
         if (anchorView != null && anchor >= 0 && anchor < pageOrder.size()) {
             layout.scrollToPositionWithOffset(anchor,
