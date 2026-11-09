@@ -987,25 +987,24 @@ public class MainActivity extends Activity {
 
     private void animateBar(View bar, boolean show, boolean top) {
         if (bar == null) return;
+        // Match the reader's inset animation duration and easing. Previously
+        // the bar faded in 165-185ms while the PDF viewport snapped instantly.
+        // Both transitions now move together, even if a second tap reverses one.
         bar.animate().cancel();
         int displacement = top ? -1 : 1;
+        float hiddenY = displacement * dp(top ? 18 : 22);
+        android.view.animation.DecelerateInterpolator ease =
+            new android.view.animation.DecelerateInterpolator(1.45f);
         if (show) {
             bar.setVisibility(View.VISIBLE);
-            if (bar.getAlpha() < .9f) {
-                bar.setTranslationY(displacement * dp(top ? 18 : 22));
-            }
-            bar.animate().alpha(1f).translationY(0f).setDuration(185)
-                .setInterpolator(new android.view.animation.DecelerateInterpolator(1.4f))
-                .start();
+            bar.animate().alpha(1f).translationY(0f).setDuration(240)
+                .setInterpolator(ease).start();
         } else {
-            bar.animate().alpha(0f)
-                .translationY(displacement * dp(top ? 18 : 22))
-                .setDuration(165)
-                .setInterpolator(new android.view.animation.AccelerateInterpolator(1.1f))
+            bar.animate().alpha(0f).translationY(hiddenY)
+                .setDuration(240).setInterpolator(ease)
                 .withEndAction(() -> {
                     if (!chromeVisible) bar.setVisibility(View.GONE);
-                })
-                .start();
+                }).start();
         }
     }
 
