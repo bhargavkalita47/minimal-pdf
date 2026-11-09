@@ -81,7 +81,11 @@ public class MainActivity extends Activity {
     private volatile int searchGeneration;
     private final ExecutorService indexWorker = Executors.newSingleThreadExecutor();
     private final ExecutorService chapterWorker = Executors.newSingleThreadExecutor();
-    private android.app.AlertDialog searchDialog;
+    private FrameLayout searchOverlay;
+    private EditText searchInput;
+    private TextView searchStatus;
+    private Button searchPrevious, searchNext;
+    private int searchMatchIndex = -1;
     private Runnable searchDebounce;
     private DocumentIndex.SearchResult activeSearch;
     private boolean hapticsEnabled = true;
@@ -113,6 +117,8 @@ public class MainActivity extends Activity {
     private TextView fileLabel;
     private TextView pageLabel;
     private ReaderIcon saveButton;
+    private ReaderIcon bookmarkButton;
+    private TextView bookmarkCaption;
     private ReaderIcon shareButton;
     private ReaderIcon openButton;
     private PageScrubber pageScrubber;
@@ -417,9 +423,11 @@ public class MainActivity extends Activity {
         actions.setGravity(Gravity.CENTER);
         actions.setPadding(dp(4), dp(1), dp(4), dp(3));
         footer.addView(actions, new LinearLayout.LayoutParams(-1, dp(59)));
-        addAction(actions, ReaderIcon.SEARCH, "Search", view -> searchPdf());
-        addAction(actions, ReaderIcon.BOOKMARK, "Bookmarks",
-            view -> showBookmarksAndChapters());
+        addAction(actions, ReaderIcon.SEARCH, "Find", view -> searchPdf());
+        bookmarkButton = addAction(actions, ReaderIcon.BOOKMARK, "Save",
+            view -> toggleBookmark());
+        bookmarkCaption = (TextView)((LinearLayout)bookmarkButton.getParent()).getChildAt(1);
+        addAction(actions, ReaderIcon.PAGES, "Saved", view -> showBookmarks());
         saveButton = addAction(actions, ReaderIcon.MOVE, "Edit", view -> showEditMenu());
         shareButton = addAction(actions, ReaderIcon.SHARE, "Share", view ->
             sharePages(new ArrayList<>(pageOrder)));
@@ -680,7 +688,7 @@ public class MainActivity extends Activity {
         android.widget.PopupMenu popup = new android.widget.PopupMenu(this, anchor);
         popup.getMenu().add(0, 1, 0, "Manage open PDFs");
         popup.getMenu().add(0, 2, 1, "Search in PDF");
-        popup.getMenu().add(0, 3, 2, "Bookmarks & chapters");
+        popup.getMenu().add(0, 3, 2, "Chapters");
         popup.getMenu().add(0, 4, 3, "Add more PDFs");
         popup.getMenu().add(0, 5, 4,
             hapticsEnabled ? "Selection vibration: On" : "Selection vibration: Off");
@@ -689,7 +697,7 @@ public class MainActivity extends Activity {
             switch (item.getItemId()) {
                 case 1: showLibraryManager(); return true;
                 case 2: searchPdf(); return true;
-                case 3: showBookmarksAndChapters(); return true;
+                case 3: showChapters(); return true;
                 case 4: chooseDocument(); return true;
                 case 5:
                     hapticsEnabled = !hapticsEnabled;
@@ -1290,6 +1298,7 @@ public class MainActivity extends Activity {
         }
         fileLabel.setText(has ? documentName : "PDF");
         updatePageCounter();
+        updateBookmarkAction();
 
     }
 
@@ -1510,55 +1519,86 @@ public class MainActivity extends Activity {
             pageSelector.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);
     }
 
+    private void updateBookmarkAction() {
+        if (bookmarkButton == null || bookmarkCaption == null) return;
+        boolean saved = renderer != null && activeDocument >= 0 &&
+            activeDocument < documents.size() && pageIndex >= 0 &&
+            pageIndex < pageOrder.size() &&
+            documents.get(activeDocument).bookmarks.contains(pageOrder.get(pageIndex));
+        bookmarkButton.setSelected(saved);
+        bookmarkButton.setContentDescription(saved ? "Remove saved page" : "Save current page");
+        bookmarkCaption.setText(saved ? "Saved" : "Save");
+        if (bookmarkButton.getParent() instanceof View)
+            ((View)bookmarkButton.getParent()).setContentDescription(
+                saved ? "Remove saved page" : "Save current page");
+    }
+
     private void toggleBookmark() {
         if (!ready()) return;
         DocumentSession session = documents.get(activeDocument);
         int original = pageOrder.get(pageIndex);
-        if (!session.bookmarks.add(original)) session.bookmarks.remove(original);
+        boolean saved = session.bookmarks.add(original);
+        if (!saved) session.bookmarks.remove(original);
+        updateBookmarkAction();
         scheduleLibrarySave();
-        toast(session.bookmarks.contains(original) ? "Page bookmarked" : "Bookmark removed");
+        if (hapticsEnabled && bookmarkButton != null)
+            bookmarkButton.performHapticFeedback(
+                android.view.HapticFeedbackConstants.CLOCK_TICK);
+        toast(saved ? "Page " + (pageIndex + 1) + " saved" : "Page removed from saved");
     }
 
-    private void showBookmarksAndChapters() {
+    /** One-tap saved-page list. Saving/removing is a separate direct action. */
+    private void showBookmarks() {
         if (!ready()) return;
         DocumentSession session = documents.get(activeDocument);
-        ArrayList<String> labels = new ArrayList<>();
-        ArrayList<Integer> targets = new ArrayList<>();
-        int original = pageOrder.get(pageIndex);
-        labels.add(session.bookmarks.contains(original)
-            ? "★ Remove bookmark from current page" : "☆ Bookmark current page");
-        targets.add(-1);
-
         ArrayList<Integer> ordered = new ArrayList<>(session.bookmarks);
+        ordered.removeIf(original -> !pageOrder.contains(original));
         ordered.sort((a, b) -> Integer.compare(pageOrder.indexOf(a), pageOrder.indexOf(b)));
-        for (int id : ordered) {
-            int display = pageOrder.indexOf(id);
-            if (display < 0) continue;
-            labels.add("★  Page " + (display + 1));
-            targets.add(id);
-        }
-        if (session.chapters.isEmpty()) {
-            labels.add(session.chaptersLoaded ? "No embedded chapter outline" :
-                "Loading chapter outline…");
-            targets.add(-2);
+
+        AlertDialog.Builder dialog = new AlertDialog.Builder(this)
+            .setTitle("Saved pages")
+            .setPositiveButton("Chapters", (d, which) -> showChapters())
+            .setNegativeButton("Done", null);
+        if (ordered.isEmpty()) {
+            dialog.setMessage("No saved pages yet. Tap Save while reading to keep a page here.");
         } else {
-            labels.add("— CHAPTERS —");
-            targets.add(-2);
-            for (Chapter part : session.chapters) {
-                int display = pageOrder.indexOf(part.originalPage);
-                if (display < 0) continue;
-                labels.add(part.title + "  · " + (display + 1));
-                targets.add(part.originalPage);
+            String[] labels = new String[ordered.size()];
+            for (int i = 0; i < ordered.size(); i++) {
+                int shownPage = pageOrder.indexOf(ordered.get(i)) + 1;
+                labels[i] = "Page " + shownPage +
+                    (shownPage - 1 == pageIndex ? "  ·  Current page" : "");
             }
+            dialog.setItems(labels, (d, selected) -> goToOriginalPage(ordered.get(selected)));
+        }
+        dialog.show();
+    }
+
+    /** Embedded PDF table of contents lives outside the saved-page list. */
+    private void showChapters() {
+        if (!ready()) return;
+        DocumentSession session = documents.get(activeDocument);
+        if (!session.chaptersLoaded) {
+            toast("Chapters are still loading");
+            return;
+        }
+        ArrayList<Chapter> valid = new ArrayList<>();
+        for (Chapter chapter : session.chapters) {
+            if (pageOrder.contains(chapter.originalPage)) valid.add(chapter);
+        }
+        if (valid.isEmpty()) {
+            toast("This PDF has no chapter list");
+            return;
+        }
+        String[] labels = new String[valid.size()];
+        for (int i = 0; i < valid.size(); i++) {
+            Chapter chapter = valid.get(i);
+            labels[i] = chapter.title + "  ·  Page " +
+                (pageOrder.indexOf(chapter.originalPage) + 1);
         }
         new AlertDialog.Builder(this)
-            .setTitle("Bookmarks & chapters")
-            .setItems(labels.toArray(new String[0]), (dialog, selected) -> {
-                int destination = targets.get(selected);
-                if (destination == -1) toggleBookmark();
-                else if (destination >= 0) goToOriginalPage(destination);
-            })
-            .setPositiveButton("Manage PDFs", (dialog, index) -> showLibraryManager())
+            .setTitle("Chapters")
+            .setItems(labels, (dialog, selected) ->
+                goToOriginalPage(valid.get(selected).originalPage))
             .setNegativeButton("Close", null)
             .show();
     }
