@@ -96,7 +96,14 @@ public class ReaderGestureTest {
                     Method add = MainActivity.class.getDeclaredMethod("addDocuments", List.class);
                     add.setAccessible(true);
                     add.invoke(activity, Collections.singletonList(Uri.fromFile(pdf)));
-
+                } catch (Throwable e) {
+                    error.set(e);
+                }
+            });
+            if (error.get() != null) throw new AssertionError(error.get());
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                try {
                     HorizontalScrollView pan =
                         (HorizontalScrollView) field(activity, "normalPan");
                     PdfPageList pages = (PdfPageList) field(activity, "pdfPages");
@@ -108,7 +115,16 @@ public class ReaderGestureTest {
                     pan.getLocationInWindow(origin);
                     float x = origin[0] + pan.getWidth() * .45f;
                     float y = origin[1] + pan.getHeight() * .48f;
+                    assertTrue("No reader dimensions: " + pan.getWidth()
+                        + "x" + pan.getHeight(), pan.getWidth() > 200 && pan.getHeight() > 200);
+                    Method isReader = MainActivity.class.getDeclaredMethod(
+                        "validReaderTouch", MotionEvent.class);
+                    isReader.setAccessible(true);
                     long down = SystemClock.uptimeMillis();
+                    MotionEvent testDown = MotionEvent.obtain(down, down,
+                        MotionEvent.ACTION_DOWN, x - 25, y, 0);
+                    boolean touchAllowed = (boolean)isReader.invoke(activity, testDown);
+                    testDown.recycle();
 
                     sendOne(activity, down, down, MotionEvent.ACTION_DOWN, x - 25, y);
                     sendTwo(activity, down, down + 15,
@@ -117,11 +133,17 @@ public class ReaderGestureTest {
                     sendTwo(activity, down, down + 45, MotionEvent.ACTION_MOVE, x, y, 45);
                     sendTwo(activity, down, down + 70, MotionEvent.ACTION_MOVE, x, y, 65);
                     sendTwo(activity, down, down + 95, MotionEvent.ACTION_MOVE, x, y, 100);
+                    boolean capturing = (boolean) field(activity, "capturingPinch");
+                    boolean readerDown = (boolean) field(activity, "downInReader");
+                    float scale = pages.getZoom();
                     sendTwo(activity, down, down + 120,
                         MotionEvent.ACTION_POINTER_UP |
                         (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT), x, y, 100);
                     sendOne(activity, down, down + 140, MotionEvent.ACTION_UP, x - 100, y);
-                    assertTrue("Two-finger zoom was not received by the normal reader",
+                    assertTrue("No normal zoom: allowed=" + touchAllowed
+                        + " capturing=" + capturing + " readerDown=" + readerDown
+                        + " scale=" + scale + " panWidth=" + pan.getWidth()
+                        + " originY=" + origin[1] + " touchY=" + y,
                         pages.getZoom() > 1.15f);
                 } catch (Throwable e) {
                     error.set(e);
