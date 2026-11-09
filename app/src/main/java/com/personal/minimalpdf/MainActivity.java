@@ -71,6 +71,9 @@ public class MainActivity extends Activity {
     private boolean chromeVisible = true;
     private FrameLayout focusOverlay;
     private FocusPageView focusPage;
+    private TextView focusPageTitle;
+    private int focusedPosition = -1;
+    private boolean focusedBitmapReady;
     private Button focusZoomButton;
     private View focusToolbar;
     private TextView focusLoading;
@@ -242,6 +245,13 @@ public class MainActivity extends Activity {
             @Override public void onSingleTap() { toggleChrome(); }
             @Override public void onDoubleTap(int position) { showFocus(position); }
             @Override public void onZoomChanged(float zoom) { /* Focus-only zoom. */ }
+            @Override public void onHorizontalSwipe(int fromPosition, int direction) {
+                swipeNormalPage(fromPosition, direction);
+            }
+            @Override public void onScrollProgress(float fractionalPage) {
+                if (pageScrubber != null && renderer != null)
+                    pageScrubber.setScrollPosition(fractionalPage);
+            }
         });
         pdfPages.setBackgroundColor(colors.canvas);
         content.addView(pdfPages, new FrameLayout.LayoutParams(-1, -1));
@@ -492,8 +502,7 @@ public class MainActivity extends Activity {
         int width = Math.min(dp(276), getResources().getDisplayMetrics().widthPixels - dp(28));
         int height = Math.min(dp(284), getResources().getDisplayMetrics().heightPixels - dp(185));
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-            width, Math.max(dp(150), height), Gravity.BOTTOM | Gravity.START);
-        params.leftMargin = dp(12);
+            width, Math.max(dp(150), height), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         params.bottomMargin = dp(113);
         overlay.addView(wheel, params);
         overlay.animate().alpha(1f).setDuration(105).start();
@@ -716,7 +725,7 @@ public class MainActivity extends Activity {
 
         FrameLayout overlay = new FrameLayout(this);
         wheelOverlay = overlay;
-        overlay.setBackgroundColor(Color.argb(78, 0, 0, 0));
+        overlay.setBackgroundColor(Color.argb(48, 0, 0, 0));
         overlay.setOnClickListener(view -> dismissWheel());
         overlay.setAlpha(0f);
         host.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
@@ -732,8 +741,7 @@ public class MainActivity extends Activity {
             getResources().getDisplayMetrics().heightPixels - dp(210));
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
             Math.min(dp(292), availableWidth), Math.min(dp(376), availableHeight),
-            Gravity.BOTTOM | Gravity.START);
-        params.leftMargin = dp(15);
+            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         params.bottomMargin = dp(116);
         overlay.addView(card, params);
 
