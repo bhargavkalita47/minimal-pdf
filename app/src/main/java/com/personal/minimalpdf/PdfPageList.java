@@ -168,7 +168,6 @@ public final class PdfPageList extends RecyclerView {
         View firstRow = first == NO_POSITION ? null : layout.findViewByPosition(first);
         final int anchorOffset = firstRow == null ? dp(2) :
             firstRow.getTop() - startTop;
-        final int documentGeneration = generation;
         adjustingReaderInsets = true;
 
         ValueAnimator animation = ValueAnimator.ofFloat(0f, 1f);
@@ -197,10 +196,11 @@ public final class PdfPageList extends RecyclerView {
                 postOnAnimation(() -> {
                     if (token != chromeInsetToken) return;
                     adjustingReaderInsets = false;
-                    if (documentGeneration == generation) {
-                        notifyVisiblePage();
-                        notifyScrollProgress();
-                    }
+                    // Publish the currently open document's position. A PDF may
+                    // have changed during the transition; stale document IDs
+                    // should not suppress the new document's final update.
+                    notifyVisiblePage();
+                    notifyScrollProgress();
                 });
             }
         });
