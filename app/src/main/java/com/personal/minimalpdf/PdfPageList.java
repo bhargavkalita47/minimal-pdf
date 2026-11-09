@@ -76,10 +76,8 @@ public final class PdfPageList extends RecyclerView {
         setItemViewCacheSize(3);
         setBackgroundColor(Color.rgb(229, 231, 235));
         // The item widths change during zoom. RecyclerView recycles rows as we scroll.
-        pan.setPinchListener((scale, focusX, focusY) -> {
-            if (zoomAnimation != null) zoomAnimation.cancel();
-            requestZoom(desiredZoom * scale, focusX, focusY);
-        });
+        // The Activity dispatches pinch updates here directly, ahead of
+        // nested horizontal/vertical child interception.
         addOnScrollListener(new OnScrollListener() {
             @Override public void onScrolled(RecyclerView view, int dx, int dy) {
                 notifyVisiblePage();
@@ -172,6 +170,12 @@ public final class PdfPageList extends RecyclerView {
             requestZoom((float) animation.getAnimatedValue(),
                 pan.getWidth() / 2f, getHeight() / 2f));
         zoomAnimation.start();
+    }
+
+    public void pinchBy(float scaleFactor, float focusX, float focusY) {
+        if (pageOrder.isEmpty() || !Float.isFinite(scaleFactor) || scaleFactor <= 0f) return;
+        if (zoomAnimation != null && zoomAnimation.isRunning()) zoomAnimation.cancel();
+        requestZoom(desiredZoom * scaleFactor, focusX, focusY);
     }
 
     private void requestZoom(float level, float focusX, float focusY) {
