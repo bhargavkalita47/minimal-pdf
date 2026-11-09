@@ -61,6 +61,7 @@ public class MainActivity extends Activity {
         float progress;
         final Set<Integer> bookmarks = new HashSet<>(); // Original page indexes
         final ArrayList<Chapter> chapters = new ArrayList<>();
+        boolean chaptersLoaded;
         DocumentSession(Uri uri, String name) { this.uri = uri; this.name = name; }
     }
     private static final class Chapter {
@@ -75,6 +76,12 @@ public class MainActivity extends Activity {
     private static final String LIBRARY_PREF = "minimal_pdf_library_v2";
     private final ArrayList<DocumentSession> documents = new ArrayList<>();
     private boolean restoringLibrary;
+    private volatile int searchGeneration;
+    private final ExecutorService indexWorker = Executors.newSingleThreadExecutor();
+    private android.app.AlertDialog searchDialog;
+    private Runnable searchDebounce;
+    private DocumentIndex.SearchResult activeSearch;
+    private boolean hapticsEnabled = true;
     private final Runnable saveLibraryRunnable = () -> persistLibrary();
     private int activeDocument = -1;
     private Uri sourceUri;
@@ -137,6 +144,8 @@ public class MainActivity extends Activity {
         barMuted = Color.rgb(169, 174, 183);
         styleSystemBars();
         PDFBoxResourceLoader.init(getApplicationContext());
+        hapticsEnabled = getSharedPreferences(LIBRARY_PREF, MODE_PRIVATE)
+            .getBoolean("haptics", true);
         buildInterface();
         if (state != null) {
             ArrayList<Bundle> stored = state.getParcelableArrayList("open_documents");
@@ -1296,6 +1305,191 @@ public class MainActivity extends Activity {
         finally { restoringLibrary = false; }
     }
 
+    /** PDF outlines are indexed off-thread and cached with each open document. */
+    private void loadChapters(DocumentSession session) {
+        if (session.chaptersLoaded) return;
+        session.chaptersLoaded = true;
+        indexWorker.execute(() -> {
+            try {
+                List<DocumentIndex.Chapter> found =
+                    DocumentIndex.chapters(getContentResolver(), session.uri);
+                runOnUiThread(() -> {
+                    if (!documents.contains(session)) return;
+                    session.chapters.clear();
+                    for (DocumentIndex.Chapter part : found) {
+                        session.chapters.add(new Chapter(part.title, part.originalPage));
+                    }
+                });
+            } catch (Exception ignored) { }
+        });
+    }
+
+    private void goToOriginalPage(int original) {
+        int position = pageOrder.indexOf(original);
+        if (position < 0 || !ready()) return;
+        pageIndex = position;
+        pdfPages.scrollToPage(position);
+        refreshUI();
+        if (hapticsEnabled && pageSelector != null)
+            pageSelector.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);
+    }
+
+    private void toggleBookmark() {
+        if (!ready()) return;
+        DocumentSession session = documents.get(activeDocument);
+        int original = pageOrder.get(pageIndex);
+        if (!session.bookmarks.add(original)) session.bookmarks.remove(original);
+        scheduleLibrarySave();
+        toast(session.bookmarks.contains(original) ? "Page bookmarked" : "Bookmark removed");
+    }
+
+    private void showBookmarksAndChapters() {
+        if (!ready()) return;
+        DocumentSession session = documents.get(activeDocument);
+        ArrayList<String> labels = new ArrayList<>();
+        ArrayList<Integer> targets = new ArrayList<>();
+        int original = pageOrder.get(pageIndex);
+        labels.add(session.bookmarks.contains(original)
+            ? "★ Remove bookmark from current page" : "☆ Bookmark current page");
+        targets.add(-1);
+
+        ArrayList<Integer> ordered = new ArrayList<>(session.bookmarks);
+        ordered.sort((a, b) -> Integer.compare(pageOrder.indexOf(a), pageOrder.indexOf(b)));
+        for (int id : ordered) {
+            int display = pageOrder.indexOf(id);
+            if (display < 0) continue;
+            labels.add("★  Page " + (display + 1));
+            targets.add(id);
+        }
+        if (session.chapters.isEmpty()) {
+            labels.add(session.chaptersLoaded ? "No embedded chapter outline" :
+                "Loading chapter outline…");
+            targets.add(-2);
+        } else {
+            labels.add("— CHAPTERS —");
+            targets.add(-2);
+            for (Chapter part : session.chapters) {
+                int display = pageOrder.indexOf(part.originalPage);
+                if (display < 0) continue;
+                labels.add(part.title + "  · " + (display + 1));
+                targets.add(part.originalPage);
+            }
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("Bookmarks & chapters")
+            .setItems(labels.toArray(new String[0]), (dialog, selected) -> {
+                int destination = targets.get(selected);
+                if (destination == -1) toggleBookmark();
+                else if (destination >= 0) goToOriginalPage(destination);
+            })
+            .setPositiveButton("Manage PDFs", (dialog, index) -> showLibraryManager())
+            .setNegativeButton("Close", null)
+            .show();
+    }
+
+    private void searchPdf() {
+        if (!ready()) return;
+        if (searchDialog != null && searchDialog.isShowing()) return;
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setPadding(dp(18), dp(12), dp(18), dp(10));
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setTextSize(16);
+        input.setHint("Find words in this PDF");
+        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        container.addView(input, new LinearLayout.LayoutParams(-1, dp(50)));
+
+        TextView status = text("Enter at least two characters", 12,
+            colors.mutedText, false);
+        status.setPadding(dp(2), dp(7), 0, dp(8));
+        container.addView(status, new LinearLayout.LayoutParams(-1, dp(35)));
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        LinearLayout matches = new LinearLayout(this);
+        matches.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(matches, new android.widget.ScrollView.LayoutParams(-1, -2));
+        container.addView(scroll, new LinearLayout.LayoutParams(-1, dp(340)));
+
+        searchDialog = new AlertDialog.Builder(this)
+            .setTitle("Search PDF")
+            .setView(container)
+            .setPositiveButton("Close", (dialog, button) -> { })
+            .create();
+        final Uri source = sourceUri;
+        searchDialog.setOnDismissListener(dialog -> {
+            searchGeneration++;
+            if (searchDebounce != null) uiHandler.removeCallbacks(searchDebounce);
+            searchDialog = null;
+        });
+        input.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start,
+                                                      int count, int after) { }
+            @Override public void onTextChanged(CharSequence text, int start,
+                                                 int before, int count) {
+                if (searchDebounce != null) uiHandler.removeCallbacks(searchDebounce);
+                final String query = text.toString().trim();
+                final int generation = ++searchGeneration;
+                matches.removeAllViews();
+                if (query.length() < 2) {
+                    status.setText("Enter at least two characters");
+                    pdfPages.setSearchHighlights(null);
+                    return;
+                }
+                status.setText("Searching selectable PDF text…");
+                searchDebounce = () -> indexWorker.execute(() -> {
+                    if (generation != searchGeneration) return;
+                    DocumentIndex.SearchResult result = null;
+                    String error = null;
+                    try {
+                        result = DocumentIndex.search(getContentResolver(),
+                            source, query, () -> generation != searchGeneration);
+                    } catch (Exception ex) {
+                        error = errorMessage(ex);
+                    }
+                    final DocumentIndex.SearchResult readyResult = result;
+                    final String failure = error;
+                    runOnUiThread(() -> {
+                        if (generation != searchGeneration || searchDialog == null ||
+                            !source.equals(sourceUri)) return;
+                        matches.removeAllViews();
+                        if (readyResult == null) {
+                            status.setText("Search failed: " + failure);
+                            return;
+                        }
+                        activeSearch = readyResult;
+                        pdfPages.setSearchHighlights(readyResult.highlights);
+                        status.setText(readyResult.matches.size() + " match(es)" +
+                            (readyResult.truncated ? " · first 200 shown" : "") +
+                            " · " + readyResult.pagesScanned + " pages scanned");
+                        int limit = Math.min(readyResult.matches.size(), 70);
+                        for (int j = 0; j < limit; j++) {
+                            DocumentIndex.Match match = readyResult.matches.get(j);
+                            int displayed = pageOrder.indexOf(match.originalPage);
+                            if (displayed < 0) continue;
+                            TextView row = text("Page " + (displayed + 1) +
+                                "    " + match.snippet, 13, colors.foreground, false);
+                            row.setPadding(dp(9), dp(11), dp(9), dp(11));
+                            row.setOnClickListener(view -> {
+                                goToOriginalPage(match.originalPage);
+                                if (searchDialog != null) searchDialog.dismiss();
+                            });
+                            matches.addView(row, new LinearLayout.LayoutParams(-1, -2));
+                        }
+                        if (readyResult.matches.isEmpty()) {
+                            TextView none = text("No matches in the text layer. Scanned PDFs require OCR.",
+                                13, colors.mutedText, false);
+                            none.setPadding(dp(8), dp(12), dp(8), dp(12));
+                            matches.addView(none);
+                        }
+                    });
+                });
+                uiHandler.postDelayed(searchDebounce, 330);
+            }
+            @Override public void afterTextChanged(android.text.Editable edit) { }
+        });
+        searchDialog.show();
+    }
+
     private void cancelRequestedDocumentSwitch() {
         documentSwitchGeneration++;
         if (pendingDocumentSwitch != null) {
@@ -1748,6 +1942,8 @@ public class MainActivity extends Activity {
         cancelRequestedDocumentSwitch();
         dismissDragPreview(false);
         documentWorker.shutdownNow();
+        searchGeneration++;
+        indexWorker.shutdownNow();
         if (editOverlay != null) {
             editOverlay.animate().cancel();
             host.removeView(editOverlay);
