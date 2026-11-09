@@ -41,25 +41,32 @@ public final class ZoomScrollView extends HorizontalScrollView {
     }
 
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
-        // Unlike handling scaling only in RecyclerView, the parent sees every
-        // pointer event even if the horizontally scrollable container intercepts.
+        // Always feed the detector from the root of this subtree. Child pages
+        // can consume taps and drags, but cannot starve two-finger scaling.
+        final int action = event.getActionMasked();
         scaleDetector.onTouchEvent(event);
-        int action = event.getActionMasked();
-        if (action == MotionEvent.ACTION_POINTER_DOWN || event.getPointerCount() > 1 ||
-            scaleDetector.isInProgress()) {
-            if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
-            gestureTaken = true;
+
+        if (action == MotionEvent.ACTION_DOWN) {
+            gestureTaken = false;
         }
-        if (gestureTaken) {
-            // Explicitly cancel the previously active single-finger child gesture.
-            if (action == MotionEvent.ACTION_POINTER_DOWN) {
+        if (action == MotionEvent.ACTION_POINTER_DOWN || event.getPointerCount() > 1) {
+            if (!gestureTaken) {
+                gestureTaken = true;
+                // Cancel any RecyclerView fling or single-finger drag exactly
+                // once; do not cancel the scale detector's pointer stream.
                 MotionEvent cancel = MotionEvent.obtain(event);
                 cancel.setAction(MotionEvent.ACTION_CANCEL);
                 super.dispatchTouchEvent(cancel);
                 cancel.recycle();
             }
-            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL)
+            if (getParent() != null)
+                getParent().requestDisallowInterceptTouchEvent(true);
+        }
+        if (gestureTaken) {
+            if (action == MotionEvent.ACTION_UP ||
+                action == MotionEvent.ACTION_CANCEL) {
                 gestureTaken = false;
+            }
             return true;
         }
         return super.dispatchTouchEvent(event);
