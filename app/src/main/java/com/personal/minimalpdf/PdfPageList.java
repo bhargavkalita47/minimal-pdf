@@ -1,5 +1,8 @@
 package com.personal.minimalpdf;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -12,6 +15,7 @@ import android.view.MotionEvent;
 import android.view.GestureDetector;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.animation.DecelerateInterpolator;
 
 
 import androidx.recyclerview.widget.LinearLayoutManager;
@@ -58,6 +62,8 @@ public final class PdfPageList extends RecyclerView {
     private boolean restoringDocument;
     private boolean adjustingReaderInsets;
     private boolean readerChromeVisible = false;
+    private ValueAnimator chromeInsetAnimator;
+    private int chromeInsetToken;
     private float readingProgress;
     private Map<Integer, List<RectF>> searchHighlights = new HashMap<>();
     public PdfPageList(Context context, PageListener listener) {
@@ -117,36 +123,95 @@ public final class PdfPageList extends RecyclerView {
         listener.onScrollProgress(readingProgress);
     }
 
-    /** Resize the *visible* reader viewport with the chrome. The scroll anchor
-     * is kept relative to the usable area, so toggling controls does not reset
-     * the active page or jump to another section of the PDF.
+    /** Animate the unobscured reader viewport in step with the toolbars.
      *
-     * In chrome mode pages are fully clipped below the header and above the
-     * footer. With chrome hidden, the padding collapses to 2dp on each edge. */
+     * Clip-to-padding keeps pages out of the header/footer when the controls
+     * are fully visible. Instead of snapping from 61/105dp to 2/2dp on tap,
+     * both edges now ease over the same 240ms used by the chrome bars.
+     * The first visible page and its offset are fixed for the transition,
+     * preventing per-frame layout recalculations from making the text jump. */
     public void setReaderChromeVisible(boolean visible) {
-        int top = dp(visible ? 61 : 2);
-        int bottom = dp(visible ? 105 : 2);
+        final int targetTop = dp(visible ? 61 : 2);
+        final int targetBottom = dp(visible ? 105 : 2);
+
         if (readerChromeVisible == visible &&
-            getPaddingTop() == top && getPaddingBottom() == bottom) return;
+            (chromeInsetAnimator != null && chromeInsetAnimator.isRunning() ||
+             getPaddingTop() == targetTop && getPaddingBottom() == targetBottom))
+            return;
+
+        readerChromeVisible = visible;
+        // An interrupted transition starts from its CURRENT insets, not from
+        // an old endpoint. Repeated taps therefore reverse smoothly.
+        int token = ++chromeInsetToken;
+        if (chromeInsetAnimator != null) {
+            chromeInsetAnimator.cancel();
+            chromeInsetAnimator = null;
+        }
+
+        int startTop = getPaddingTop();
+        int startBottom = getPaddingBottom();
+        if (startTop == targetTop && startBottom == targetBottom) {
+            adjustingReaderInsets = false;
+            return;
+        }
+
+        // Do not animate before the initial layout or when no PDF is loaded.
+        if (getHeight() == 0 || adapter.getItemCount() == 0 ||
+            !isAttachedToWindow()) {
+            setPadding(0, targetTop, 0, targetBottom);
+            adjustingReaderInsets = false;
+            return;
+        }
 
         stopScroll();
-        int first = layout.findFirstVisibleItemPosition();
-        View current = first == NO_POSITION ? null : layout.findViewByPosition(first);
-        int offset = current == null ? dp(2) : current.getTop() - getPaddingTop();
-        final int requestGeneration = generation;
-        readerChromeVisible = visible;
+        final int first = layout.findFirstVisibleItemPosition();
+        View firstRow = first == NO_POSITION ? null : layout.findViewByPosition(first);
+        final int anchorOffset = firstRow == null ? dp(2) :
+            firstRow.getTop() - startTop;
+        final int documentGeneration = generation;
         adjustingReaderInsets = true;
-        setPadding(0, top, 0, bottom);
-        if (first != NO_POSITION && adapter.getItemCount() > 0) {
-            layout.scrollToPositionWithOffset(first, offset);
-        }
-        postOnAnimation(() -> {
-            adjustingReaderInsets = false;
-            if (requestGeneration == generation) {
-                notifyVisiblePage();
-                notifyScrollProgress();
+
+        ValueAnimator animation = ValueAnimator.ofFloat(0f, 1f);
+        chromeInsetAnimator = animation;
+        animation.setDuration(240);
+        animation.setInterpolator(new DecelerateInterpolator(1.45f));
+        animation.addUpdateListener(frame -> {
+            if (token != chromeInsetToken) return;
+            float progress = (float)frame.getAnimatedValue();
+            int top = Math.round(startTop + (targetTop - startTop) * progress);
+            int bottom = Math.round(startBottom +
+                (targetBottom - startBottom) * progress);
+            applyReaderInsets(top, bottom, first, anchorOffset);
+        });
+        animation.addListener(new AnimatorListenerAdapter() {
+            boolean cancelled;
+            @Override public void onAnimationCancel(Animator running) {
+                cancelled = true;
+            }
+            @Override public void onAnimationEnd(Animator running) {
+                if (cancelled || token != chromeInsetToken) return;
+                chromeInsetAnimator = null;
+                applyReaderInsets(targetTop, targetBottom, first, anchorOffset);
+                // Wait for the final RecyclerView layout before reporting
+                // scroll progress; never record a mid-animation page position.
+                postOnAnimation(() -> {
+                    if (token != chromeInsetToken) return;
+                    adjustingReaderInsets = false;
+                    if (documentGeneration == generation) {
+                        notifyVisiblePage();
+                        notifyScrollProgress();
+                    }
+                });
             }
         });
+        animation.start();
+    }
+
+    private void applyReaderInsets(int top, int bottom, int first, int offset) {
+        if (getPaddingTop() == top && getPaddingBottom() == bottom) return;
+        setPadding(0, top, 0, bottom);
+        if (first != NO_POSITION && first < adapter.getItemCount())
+            layout.scrollToPositionWithOffset(first, offset);
     }
 
     /** Restore each document directly to its saved page. Never publish page 0
@@ -227,6 +292,11 @@ public final class PdfPageList extends RecyclerView {
     }
 
     public void dispose() {
+        chromeInsetToken++;
+        if (chromeInsetAnimator != null) {
+            chromeInsetAnimator.cancel();
+            chromeInsetAnimator = null;
+        }
         clearDocument();
         renderQueue.shutdownNow();
     }
