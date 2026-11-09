@@ -4,6 +4,14 @@ A minimal offline Android PDF reader and page organizer for personal use. No acc
 
 ## Features
 
+### Version 1.7 gestures and layout
+
+- **Edit** opens a separate bottom sheet with Move, Extract, Remove, Reset, and Save. The normal toolbar contains only reading, loading, sharing, and navigation controls.
+- The compact bottom-left **PDF** and **page** selectors support **tap** to open a picker or **drag directly up and down** to scroll the selection wheel; release to select.
+- Normal continuous-reader pinch detection is now owned by the Activity rather than nested scrolling views, so it works independently of the focused single-page view.
+- Pinch zoom changes are coalesced at most once per display frame and PDF export still preserves selectable source content.
+
+
 - Automatically match the phone's light/dark theme, including when system appearance changes
 - Clean, compact reader interface with an improved empty state and organized page actions
 - Open PDF files using Android's document picker or another app's **Open with** action
