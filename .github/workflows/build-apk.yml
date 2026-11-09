@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main, dev/v1.8-live-scrub]
+    branches: [main, dev/v1.9-navigation-polish]
   workflow_dispatch:
 
 jobs:
