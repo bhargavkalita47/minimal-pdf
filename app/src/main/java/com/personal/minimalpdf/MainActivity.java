@@ -979,47 +979,132 @@ public class MainActivity extends Activity {
         current.page = pageIndex;
     }
 
-    private void switchDocument(int position) {
-        if (busy || position < 0 || position >= documents.size()) return;
-        if (position == activeDocument && renderer != null) return;
-        DocumentSession chosen = documents.get(position);
-        try {
-            ParcelFileDescriptor descriptor =
-                getContentResolver().openFileDescriptor(chosen.uri, "r");
-            if (descriptor == null) throw new Exception("Could not read file");
-            PdfRenderer next;
-            try { next = new PdfRenderer(descriptor); }
-            catch (Exception error) { descriptor.close(); throw error; }
+    private void cancelRequestedDocumentSwitch() {
+        documentSwitchGeneration++;
+        if (pendingDocumentSwitch != null) {
+            uiHandler.removeCallbacks(pendingDocumentSwitch);
+            pendingDocumentSwitch = null;
+        }
+        requestedDocument = -1;
+    }
 
-            saveActiveSession();
-            closeDocument();
-            sourceFd = descriptor;
-            renderer = next;
-            sourceUri = chosen.uri;
-            documentName = chosen.name;
-            activeDocument = position;
-            pageOrder.clear();
-            if (validOrder(chosen.order)) {
-                pageOrder.addAll(chosen.order);
-            } else {
-                for (int i = 0; i < renderer.getPageCount(); i++) pageOrder.add(i);
-                chosen.order.clear();
-                chosen.order.addAll(pageOrder);
-                chosen.page = 0;
-            }
-            pageIndex = Math.max(0, Math.min(pageOrder.size() - 1, chosen.page));
-            pdfPages.setDocument(renderer, pageOrder);
-            pdfPages.scrollToPage(pageIndex);
-            if (emptyView != null) emptyView.setVisibility(View.GONE);
+    private void applyOpenedDocument(int position, ParcelFileDescriptor descriptor,
+                                     PdfRenderer opened) {
+        DocumentSession chosen = documents.get(position);
+        saveActiveSession();
+        closeDocument();
+        sourceFd = descriptor;
+        renderer = opened;
+        sourceUri = chosen.uri;
+        documentName = chosen.name;
+        activeDocument = position;
+        requestedDocument = -1;
+        pendingDocumentSwitch = null;
+
+        pageOrder.clear();
+        if (validOrder(chosen.order)) {
+            pageOrder.addAll(chosen.order);
+        } else {
+            for (int index = 0; index < renderer.getPageCount(); index++)
+                pageOrder.add(index);
+            chosen.order.clear();
+            chosen.order.addAll(pageOrder);
+            chosen.page = 0;
+        }
+        pageIndex = pageOrder.isEmpty() ? 0 :
+            Math.max(0, Math.min(pageOrder.size() - 1, chosen.page));
+        pdfPages.setDocument(renderer, pageOrder);
+        if (!pageOrder.isEmpty()) pdfPages.scrollToPage(pageIndex);
+        if (emptyView != null) emptyView.setVisibility(View.GONE);
+        if (!chromeVisible) {
             chromeVisible = true;
             applyChrome();
-            refreshUI();
+        }
+        refreshUI();
+    }
+
+    /** Normal tap selection may open immediately; finger-driven changes use
+     * background loading below to keep the UI thread free. */
+    private void switchDocument(int position) {
+        if (busy || position < 0 || position >= documents.size()) return;
+        cancelRequestedDocumentSwitch();
+        if (position == activeDocument && renderer != null) return;
+        try {
+            ParcelFileDescriptor descriptor =
+                getContentResolver().openFileDescriptor(documents.get(position).uri, "r");
+            if (descriptor == null) throw new Exception("Could not read file");
+            PdfRenderer opened;
+            try { opened = new PdfRenderer(descriptor); }
+            catch (Exception error) { descriptor.close(); throw error; }
+            applyOpenedDocument(position, descriptor, opened);
         } catch (Exception error) {
             toast("Could not open PDF: " + error.getMessage());
         }
     }
 
+    /** Keep the PDF name and wheel moving with the finger, while opening the
+     * requested PDF off-thread. Stale requests are discarded when scrubbing fast. */
+    private void requestDocumentSwitchLive(int position, boolean immediate) {
+        if (busy || position < 0 || position >= documents.size()) return;
+        if (position == activeDocument && renderer != null) {
+            cancelRequestedDocumentSwitch();
+            return;
+        }
+        if (requestedDocument == position && pendingDocumentSwitch != null && !immediate)
+            return;
+
+        cancelRequestedDocumentSwitch();
+        requestedDocument = position;
+        final int token = documentSwitchGeneration;
+        final Uri uri = documents.get(position).uri;
+        Runnable request = () -> {
+            pendingDocumentSwitch = null;
+            documentWorker.execute(() -> {
+                if (token != documentSwitchGeneration) return;
+                ParcelFileDescriptor descriptor = null;
+                PdfRenderer opened = null;
+                String error = null;
+                try {
+                    descriptor = getContentResolver().openFileDescriptor(uri, "r");
+                    if (descriptor == null) throw new Exception("Could not read file");
+                    opened = new PdfRenderer(descriptor);
+                } catch (Exception failure) {
+                    error = failure.getMessage();
+                    if (opened != null) { try { opened.close(); } catch (Exception ignored) { } }
+                    if (descriptor != null) { try { descriptor.close(); } catch (Exception ignored) { } }
+                    opened = null;
+                    descriptor = null;
+                }
+                final ParcelFileDescriptor readyDescriptor = descriptor;
+                final PdfRenderer readyRenderer = opened;
+                final String failureMessage = error;
+                runOnUiThread(() -> {
+                    if (token != documentSwitchGeneration || isFinishing() || isDestroyed()) {
+                        if (readyRenderer != null) {
+                            try { readyRenderer.close(); } catch (Exception ignored) { }
+                        }
+                        if (readyDescriptor != null) {
+                            try { readyDescriptor.close(); } catch (Exception ignored) { }
+                        }
+                        return;
+                    }
+                    if (readyDescriptor != null && readyRenderer != null) {
+                        applyOpenedDocument(position, readyDescriptor, readyRenderer);
+                    } else {
+                        requestedDocument = -1;
+                        refreshUI();
+                        toast("Could not open PDF: " + failureMessage);
+                    }
+                });
+            });
+        };
+        pendingDocumentSwitch = request;
+        uiHandler.postDelayed(request, immediate ? 0 : 55);
+    }
+
     private void closeAllDocuments() {
+        cancelRequestedDocumentSwitch();
+        dismissDragPreview(false);
         dismissWheel();
         closeDocument();
         documents.clear();
