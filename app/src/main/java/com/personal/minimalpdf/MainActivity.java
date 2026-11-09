@@ -1619,6 +1619,9 @@ public class MainActivity extends Activity {
                                      PdfRenderer opened) {
         DocumentSession chosen = documents.get(position);
         saveActiveSession();
+        searchGeneration++; // Cancel any search against the old document.
+        if (searchDialog != null) searchDialog.dismiss();
+        activeSearch = null;
         closeDocument();
         sourceFd = descriptor;
         renderer = opened;
@@ -1642,8 +1645,10 @@ public class MainActivity extends Activity {
             Math.max(0, Math.min(pageOrder.size() - 1, chosen.page));
         // Bind and restore atomically; the old setDocument() forced a page-1
         // callback before this value could be applied.
-        pdfPages.setDocument(renderer, pageOrder, pageIndex,
-            chosen.progress);
+        float restoredProgress = Float.isFinite(chosen.progress)
+            ? Math.max(0f, Math.min(pageOrder.size() - 1f, chosen.progress)) : pageIndex;
+        int firstVisible = Math.max(0, (int)Math.floor(restoredProgress));
+        pdfPages.setDocument(renderer, pageOrder, firstVisible, restoredProgress);
         if (emptyView != null) emptyView.setVisibility(View.GONE);
         if (!chromeVisible) {
             chromeVisible = true;
@@ -2059,6 +2064,7 @@ public class MainActivity extends Activity {
         dismissDragPreview(false);
         documentWorker.shutdownNow();
         searchGeneration++;
+        if (searchDialog != null) searchDialog.dismiss();
         indexWorker.shutdownNow();
         if (editOverlay != null) {
             editOverlay.animate().cancel();
