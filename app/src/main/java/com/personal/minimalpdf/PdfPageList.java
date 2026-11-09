@@ -19,6 +19,8 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -54,6 +56,8 @@ public final class PdfPageList extends RecyclerView {
     private PdfRenderer pdf;
     private volatile int generation = 0;
     private boolean restoringDocument;
+    private float readingProgress;
+    private Map<Integer, List<RectF>> searchHighlights = new HashMap<>();
     public PdfPageList(Context context, PageListener listener) {
         super(context);
         this.listener = listener;
@@ -64,7 +68,8 @@ public final class PdfPageList extends RecyclerView {
         setItemAnimator(null);
         setHasFixedSize(false);
         setClipToPadding(false);
-        setPadding(0, dp(70), 0, dp(125));
+        // Never reserve invisible toolbar height inside the reader. Toolbars are overlays.
+        setPadding(0, dp(2), 0, dp(2));
         setItemViewCacheSize(3);
         setBackgroundColor(Color.rgb(229, 231, 235));
         addOnScrollListener(new OnScrollListener() {
@@ -102,14 +107,14 @@ public final class PdfPageList extends RecyclerView {
         if (row == null) return;
         float fractional = Math.max(0f, Math.min(1f,
             (getPaddingTop() - row.getTop()) / (float)Math.max(1, row.getHeight())));
-        listener.onScrollProgress(Math.min(adapter.getItemCount() - 1f,
-            first + fractional));
+        readingProgress = Math.min(adapter.getItemCount() - 1f, first + fractional);
+        listener.onScrollProgress(readingProgress);
     }
 
     /** Restore each document directly to its saved page. Never publish page 0
      * during binding: that old notification overwrote MainActivity's pageIndex,
      * making every PDF reopen at its first page. */
-    public void setDocument(PdfRenderer reader, List<Integer> order, int initialPage) {
+    public void setDocument(PdfRenderer reader, List<Integer> order, int initialPage, float initialProgress) {
         stopScroll();
         restoringDocument = true;
         final int request;
@@ -120,17 +125,27 @@ public final class PdfPageList extends RecyclerView {
         pageOrder = order;
         inFlight.clear();
         bitmaps.evictAll();
+        searchHighlights.clear(); // Search highlights are specific to the previous PDF.
         adapter.notifyDataSetChanged();
         if (!pageOrder.isEmpty()) {
             int target = Math.max(0, Math.min(pageOrder.size() - 1, initialPage));
-            layout.scrollToPositionWithOffset(target, dp(6));
-            listener.onScrollProgress(target);
+            float fraction = Math.max(0f, Math.min(.995f, initialProgress - target));
+            readingProgress = target + fraction;
+            layout.scrollToPositionWithOffset(target, dp(2));
             postOnAnimation(() -> {
                 if (generation != request || pdf == null) return;
-                restoringDocument = false;
-                // After layout, use the actual first visible page.
-                notifyVisiblePage();
-                notifyScrollProgress();
+                View row = layout.findViewByPosition(target);
+                if (row != null && fraction > 0f) {
+                    layout.scrollToPositionWithOffset(target,
+                        dp(2) - Math.round(fraction * row.getHeight()));
+                }
+                // Do not publish a transient wrong page during first layout.
+                postOnAnimation(() -> {
+                    if (generation != request || pdf == null) return;
+                    restoringDocument = false;
+                    notifyVisiblePage();
+                    notifyScrollProgress();
+                });
             });
         } else {
             restoringDocument = false;
@@ -139,13 +154,20 @@ public final class PdfPageList extends RecyclerView {
 
     public void clearDocument() {
         restoringDocument = false;
+        readingProgress = 0f;
         synchronized (renderLock) {
             generation++;
             pdf = null;
         }
         inFlight.clear();
         bitmaps.evictAll();
+        searchHighlights.clear();
         pageOrder = new ArrayList<>();
+        adapter.notifyDataSetChanged();
+    }
+
+    public void setSearchHighlights(Map<Integer, List<RectF>> highlights) {
+        searchHighlights = highlights == null ? new HashMap<>() : highlights;
         adapter.notifyDataSetChanged();
     }
 
@@ -155,10 +177,13 @@ public final class PdfPageList extends RecyclerView {
         scrollToPage(currentPage);
     }
 
+    public float getReadingProgress() { return readingProgress; }
+
     public void scrollToPage(int index) {
         if (index < 0 || index >= adapter.getItemCount()) return;
         stopScroll();
-        layout.scrollToPositionWithOffset(index, dp(6));
+        layout.scrollToPositionWithOffset(index, dp(2));
+        readingProgress = index;
         listener.onVisiblePageChanged(index);
         listener.onScrollProgress(index);
     }
@@ -243,6 +268,7 @@ public final class PdfPageList extends RecyclerView {
             int original = pageOrder.get(position);
             Bitmap cached = bitmaps.get(original);
             holder.page.setBitmap(cached);
+            holder.page.setHighlights(searchHighlights.get(original));
             if (cached == null) loadPage(original);
         }
 
@@ -263,6 +289,8 @@ public final class PdfPageList extends RecyclerView {
         private static final float A4_ASPECT = 842f / 595f;
         private final Paint paper = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint imagePaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+        private final Paint highlightPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private List<RectF> highlights;
         private Bitmap bitmap;
         private GestureDetector taps;
         private float aspect = A4_ASPECT;
@@ -275,6 +303,7 @@ public final class PdfPageList extends RecyclerView {
             // Only a 1dp margin above and below: adjacent pages nearly touch.
             gutterY = Math.max(1, (int)(1f * density + .5f));
             paper.setColor(Color.WHITE);
+            highlightPaint.setColor(Color.argb(97, 255, 193, 54));
         }
 
         interface TapActions {
@@ -324,6 +353,11 @@ public final class PdfPageList extends RecyclerView {
             return true;
         }
 
+        void setHighlights(List<RectF> rectangles) {
+            highlights = rectangles;
+            invalidate();
+        }
+
         void setBitmap(Bitmap updated) {
             bitmap = updated;
             aspect = updated == null ? A4_ASPECT : (float)updated.getHeight() / updated.getWidth();
@@ -345,6 +379,15 @@ public final class PdfPageList extends RecyclerView {
             canvas.drawRect(bounds, paper);
             if (bitmap != null && !bitmap.isRecycled()) {
                 canvas.drawBitmap(bitmap, null, bounds, imagePaint);
+                if (highlights != null) {
+                    for (RectF r : highlights) {
+                        canvas.drawRect(
+                            bounds.left + bounds.width() * r.left,
+                            bounds.top + bounds.height() * r.top,
+                            bounds.left + bounds.width() * r.right,
+                            bounds.top + bounds.height() * r.bottom, highlightPaint);
+                    }
+                }
             }
         }
     }

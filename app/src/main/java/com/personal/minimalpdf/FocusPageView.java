@@ -207,9 +207,13 @@ public final class FocusPageView extends View {
                 float dy = e.getY() - gestureStartY;
                 float d = getResources().getDisplayMetrics().density;
                 float vx = swipeVelocity == null ? 0f : swipeVelocity.getXVelocity();
+                // When zoomed, a deliberate quick swipe changes pages; a
+                // slow horizontal drag pans the zoomed image instead.
+                boolean deliberateSwipe = zoom <= 1.02f
+                    ? (Math.abs(vx) >= 250f * d || Math.abs(dx) >= 112f * d)
+                    : (Math.abs(vx) >= 420f * d && Math.abs(dx) >= 75f * d);
                 if (Math.abs(dx) >= 56f * d &&
-                    Math.abs(dx) > Math.abs(dy) * 1.35f &&
-                    (Math.abs(vx) >= 250f * d || Math.abs(dx) >= 112f * d)) {
+                    Math.abs(dx) > Math.abs(dy) * 1.35f && deliberateSwipe) {
                     actions.onHorizontalSwipe(dx < 0 ? 1 : -1);
                 }
             }

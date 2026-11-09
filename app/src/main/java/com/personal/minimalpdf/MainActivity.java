@@ -12,6 +12,11 @@ import android.graphics.drawable.GradientDrawable;
 import android.graphics.pdf.PdfRenderer;
 import android.net.Uri;
 import android.os.Bundle;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import org.json.JSONException;
+import java.util.HashSet;
+import java.util.Set;
 import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
 import android.text.InputType;
@@ -53,10 +58,34 @@ public class MainActivity extends Activity {
         final String name;
         final ArrayList<Integer> order = new ArrayList<>();
         int page;
+        float progress;
+        final Set<Integer> bookmarks = new HashSet<>(); // Original page indexes
+        final ArrayList<Chapter> chapters = new ArrayList<>();
+        boolean chaptersLoaded;
+        boolean chaptersLoading;
         DocumentSession(Uri uri, String name) { this.uri = uri; this.name = name; }
     }
+    private static final class Chapter {
+        final String title;
+        final int originalPage;
+        Chapter(String title, int originalPage) {
+            this.title = title;
+            this.originalPage = originalPage;
+        }
+    }
 
+    private static final String LIBRARY_PREF = "minimal_pdf_library_v2";
     private final ArrayList<DocumentSession> documents = new ArrayList<>();
+    private final ArrayList<DocumentSession> recentDocuments = new ArrayList<>();
+    private boolean restoringLibrary;
+    private volatile int searchGeneration;
+    private final ExecutorService indexWorker = Executors.newSingleThreadExecutor();
+    private final ExecutorService chapterWorker = Executors.newSingleThreadExecutor();
+    private android.app.AlertDialog searchDialog;
+    private Runnable searchDebounce;
+    private DocumentIndex.SearchResult activeSearch;
+    private boolean hapticsEnabled = true;
+    private final Runnable saveLibraryRunnable = () -> persistLibrary();
     private int activeDocument = -1;
     private Uri sourceUri;
     private ParcelFileDescriptor sourceFd;
@@ -118,6 +147,8 @@ public class MainActivity extends Activity {
         barMuted = Color.rgb(169, 174, 183);
         styleSystemBars();
         PDFBoxResourceLoader.init(getApplicationContext());
+        hapticsEnabled = getSharedPreferences(LIBRARY_PREF, MODE_PRIVATE)
+            .getBoolean("haptics", true);
         buildInterface();
         if (state != null) {
             ArrayList<Bundle> stored = state.getParcelableArrayList("open_documents");
@@ -130,6 +161,9 @@ public class MainActivity extends Activity {
                     ArrayList<Integer> order = entry.getIntegerArrayList("order");
                     if (order != null) session.order.addAll(order);
                     session.page = entry.getInt("page", 0);
+                    session.progress = entry.getFloat("progress", session.page);
+                    ArrayList<Integer> marks = entry.getIntegerArrayList("bookmarks");
+                    if (marks != null) session.bookmarks.addAll(marks);
                     documents.add(session);
                 }
                 if (!documents.isEmpty()) {
@@ -140,10 +174,10 @@ public class MainActivity extends Activity {
             chromeVisible = state.getBoolean("chrome_visible", true);
             applyChrome();
         }
-        if (documents.isEmpty()) {
-            Uri incoming = getIntent() == null ? null : getIntent().getData();
-            if (incoming != null) addDocuments(java.util.Collections.singletonList(incoming));
-        }
+        if (state == null) restoreSavedLibrary();
+        else restoreRecentOnly();
+        Uri incoming = getIntent() == null ? null : getIntent().getData();
+        if (incoming != null) addDocuments(java.util.Collections.singletonList(incoming));
         if (state != null) {
             chromeVisible = state.getBoolean("chrome_visible", true);
             applyChrome();
@@ -252,6 +286,10 @@ public class MainActivity extends Activity {
             @Override public void onScrollProgress(float fractionalPage) {
                 if (pageScrubber != null && renderer != null)
                     pageScrubber.setScrollPosition(fractionalPage);
+                if (activeDocument >= 0 && activeDocument < documents.size() && renderer != null) {
+                    documents.get(activeDocument).progress = fractionalPage;
+                    scheduleLibrarySave();
+                }
             }
         });
         pdfPages.setBackgroundColor(colors.canvas);
@@ -295,7 +333,7 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams scrubParams = new FrameLayout.LayoutParams(
             dp(49), -1, Gravity.END);
         scrubParams.topMargin = dp(67);
-        scrubParams.bottomMargin = dp(121);
+        scrubParams.bottomMargin = dp(111);
         host.addView(pageScrubber, scrubParams);
 
         // Fixed overlays: hiding controls never resizes the document viewport.
@@ -329,14 +367,11 @@ public class MainActivity extends Activity {
         meta.addView(fileLabel, new LinearLayout.LayoutParams(-1, dp(23)));
         pageLabel = text("Open a document", 11, barMuted, false);
         pageLabel.setSingleLine(true);
-        pageLabel.setOnClickListener(view -> showPages());
+        pageLabel.setOnClickListener(view -> showLibraryManager());
         meta.addView(pageLabel, new LinearLayout.LayoutParams(-1, dp(19)));
 
         openButton = iconButton(ReaderIcon.OPEN, "Open PDF", view -> chooseDocument());
         header.addView(openButton, new LinearLayout.LayoutParams(dp(43), dp(48)));
-        shareButton = iconButton(ReaderIcon.SHARE, "Share PDF",
-            view -> sharePages(new ArrayList<>(pageOrder)));
-        header.addView(shareButton, new LinearLayout.LayoutParams(dp(43), dp(48)));
         ReaderIcon more = iconButton(ReaderIcon.MORE, "More actions", this::showReaderMenu);
         header.addView(more, new LinearLayout.LayoutParams(dp(43), dp(48)));
 
@@ -344,7 +379,7 @@ public class MainActivity extends Activity {
         footer.setOrientation(LinearLayout.VERTICAL);
         footer.setBackgroundColor(barBackground);
         footerView = footer;
-        host.addView(footer, new FrameLayout.LayoutParams(-1, dp(112), Gravity.BOTTOM));
+        host.addView(footer, new FrameLayout.LayoutParams(-1, dp(103), Gravity.BOTTOM));
 
         LinearLayout paging = new LinearLayout(this);
         paging.setGravity(Gravity.CENTER_VERTICAL);
@@ -381,12 +416,13 @@ public class MainActivity extends Activity {
         LinearLayout actions = new LinearLayout(this);
         actions.setGravity(Gravity.CENTER);
         actions.setPadding(dp(4), dp(1), dp(4), dp(3));
-        footer.addView(actions, new LinearLayout.LayoutParams(-1, dp(67)));
-        addAction(actions, ReaderIcon.PAGES, "Pages", view -> showWheel(true));
-        addAction(actions, ReaderIcon.OPEN, "PDFs", view -> showWheel(false));
-        addAction(actions, ReaderIcon.SHARE, "Share", view ->
-            sharePages(new ArrayList<>(pageOrder)));
+        footer.addView(actions, new LinearLayout.LayoutParams(-1, dp(59)));
+        addAction(actions, ReaderIcon.SEARCH, "Search", view -> searchPdf());
+        addAction(actions, ReaderIcon.BOOKMARK, "Bookmarks",
+            view -> showBookmarksAndChapters());
         saveButton = addAction(actions, ReaderIcon.MOVE, "Edit", view -> showEditMenu());
+        shareButton = addAction(actions, ReaderIcon.SHARE, "Share", view ->
+            sharePages(new ArrayList<>(pageOrder)));
 
         refreshUI();
     }
@@ -400,15 +436,15 @@ public class MainActivity extends Activity {
         cell.setOnClickListener(view -> {
             if (ready()) callback.onClick(view);
         });
-        actions.addView(cell, new LinearLayout.LayoutParams(0, dp(65), 1));
+        actions.addView(cell, new LinearLayout.LayoutParams(0, dp(57), 1));
 
         ReaderIcon icon = iconButton(symbol, label, view -> {
             if (ready()) callback.onClick(view);
         });
-        cell.addView(icon, new LinearLayout.LayoutParams(dp(40), dp(38)));
+        cell.addView(icon, new LinearLayout.LayoutParams(dp(43), dp(37)));
         TextView caption = text(label, 10, barMuted, false);
         caption.setGravity(Gravity.CENTER);
-        cell.addView(caption, new LinearLayout.LayoutParams(-1, dp(18)));
+        cell.addView(caption, new LinearLayout.LayoutParams(-1, dp(17)));
         documentButtons.add(icon);
         return icon;
     }
@@ -504,7 +540,7 @@ public class MainActivity extends Activity {
         int height = Math.min(dp(284), getResources().getDisplayMetrics().heightPixels - dp(185));
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
             width, Math.max(dp(150), height), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        params.bottomMargin = dp(113);
+        params.bottomMargin = dp(107);
         overlay.addView(wheel, params);
         overlay.animate().alpha(1f).setDuration(105).start();
     }
@@ -562,6 +598,7 @@ public class MainActivity extends Activity {
         private boolean dragging;
         private int initial;
         private int lastSelection;
+        private long lastVibration;
 
         DirectWheelGesture(boolean pages) { this.pages = pages; }
 
@@ -581,6 +618,12 @@ public class MainActivity extends Activity {
         private void updateSelection(int selection) {
             if (selection == lastSelection) return;
             lastSelection = selection;
+            long now = android.os.SystemClock.uptimeMillis();
+            if (hapticsEnabled && now - lastVibration >= 85L) {
+                (pages ? pageSelector : documentSelector).performHapticFeedback(
+                    android.view.HapticFeedbackConstants.CLOCK_TICK);
+                lastVibration = now;
+            }
             if (pages) {
                 jumpPageLive(selection);
             } else {
@@ -635,32 +678,153 @@ public class MainActivity extends Activity {
 
     private void showReaderMenu(View anchor) {
         android.widget.PopupMenu popup = new android.widget.PopupMenu(this, anchor);
-        popup.getMenu().add(0, 1, 0, "Edit PDF");
-        popup.getMenu().add(0, 2, 1, "Reset page order");
-        popup.getMenu().add(0, 3, 2, "Add more PDFs");
-        popup.getMenu().add(0, 4, 3, "Switch PDF");
-        popup.getMenu().add(0, 5, 4, "Close all documents");
+        popup.getMenu().add(0, 1, 0, "Manage open PDFs");
+        popup.getMenu().add(0, 2, 1, "Search in PDF");
+        popup.getMenu().add(0, 3, 2, "Bookmarks & chapters");
+        popup.getMenu().add(0, 4, 3, "Add more PDFs");
+        popup.getMenu().add(0, 5, 4,
+            hapticsEnabled ? "Selection vibration: On" : "Selection vibration: Off");
+        popup.getMenu().add(0, 6, 5, "Close all documents");
         popup.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
-                case 1:
-                    showEditMenu();
-                    return true;
-                case 2:
-                    resetPages();
-                    return true;
-                case 3:
-                    chooseDocument();
-                    return true;
-                case 4:
-                    showWheel(false);
-                    return true;
+                case 1: showLibraryManager(); return true;
+                case 2: searchPdf(); return true;
+                case 3: showBookmarksAndChapters(); return true;
+                case 4: chooseDocument(); return true;
                 case 5:
-                    closeAllDocuments();
+                    hapticsEnabled = !hapticsEnabled;
+                    getSharedPreferences(LIBRARY_PREF, MODE_PRIVATE).edit()
+                        .putBoolean("haptics", hapticsEnabled).apply();
+                    toast(hapticsEnabled ? "Selection vibration enabled" :
+                        "Selection vibration disabled");
                     return true;
+                case 6: closeAllDocuments(); return true;
             }
             return false;
         });
         popup.show();
+    }
+
+    private void moveOpenDocument(int from, int to) {
+        if (from < 0 || from >= documents.size() ||
+            to < 0 || to >= documents.size() || from == to) return;
+        saveActiveSession();
+        DocumentSession active = activeDocument >= 0 ? documents.get(activeDocument) : null;
+        DocumentSession item = documents.remove(from);
+        documents.add(to, item);
+        activeDocument = active == null ? -1 : documents.indexOf(active);
+        scheduleLibrarySave();
+    }
+
+    private void closeOpenDocument(int index) {
+        if (index < 0 || index >= documents.size()) return;
+        cancelRequestedDocumentSwitch();
+        saveActiveSession();
+        boolean closingActive = index == activeDocument;
+        if (closingActive) closeDocument();
+        addToRecent(documents.get(index));
+        documents.remove(index);
+        if (closingActive) {
+            activeDocument = -1;
+            if (!documents.isEmpty()) {
+                switchDocument(Math.min(index, documents.size() - 1));
+            } else {
+                pageOrder.clear();
+                sourceUri = null;
+                pageIndex = 0;
+                documentName = "document.pdf";
+                refreshUI();
+            }
+        } else if (index < activeDocument) {
+            activeDocument--;
+        }
+        scheduleLibrarySave();
+    }
+
+    private void showLibraryManager() {
+        LinearLayout frame = new LinearLayout(this);
+        frame.setOrientation(LinearLayout.VERTICAL);
+        frame.setPadding(dp(16), dp(8), dp(16), dp(12));
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(list, new android.widget.ScrollView.LayoutParams(-1, -2));
+        frame.addView(scroll, new LinearLayout.LayoutParams(-1,
+            Math.min(dp(440), getResources().getDisplayMetrics().heightPixels / 2)));
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("Open PDFs")
+            .setView(frame)
+            .setPositiveButton("+ Add PDFs", (d, n) -> chooseDocument())
+            .setNegativeButton("Done", null)
+            .create();
+        if (documents.isEmpty()) {
+            TextView none = text("No documents open", 14, colors.mutedText, false);
+            list.addView(none);
+        }
+        for (int i = 0; i < documents.size(); i++) {
+            final int position = i;
+            DocumentSession session = documents.get(i);
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, dp(4), 0, dp(4));
+            list.addView(row, new LinearLayout.LayoutParams(-1, dp(65)));
+
+            TextView name = text((i == activeDocument ? "●  " : "") +
+                shortName(session.name) + "\nPage " + (session.page + 1) +
+                (session.bookmarks.isEmpty() ? "" :
+                    "  · " + session.bookmarks.size() + " bookmarks"),
+                13, colors.foreground, i == activeDocument);
+            name.setMaxLines(2);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            name.setGravity(Gravity.CENTER_VERTICAL);
+            row.addView(name, new LinearLayout.LayoutParams(0, -1, 1));
+            name.setOnClickListener(view -> {
+                dialog.dismiss();
+                switchDocument(position);
+            });
+
+            Button up = button("↑", view -> {
+                moveOpenDocument(position, position - 1);
+                dialog.dismiss();
+                showLibraryManager();
+            });
+            up.setEnabled(position > 0);
+            row.addView(up, new LinearLayout.LayoutParams(dp(38), dp(45)));
+            Button down = button("↓", view -> {
+                moveOpenDocument(position, position + 1);
+                dialog.dismiss();
+                showLibraryManager();
+            });
+            down.setEnabled(position < documents.size() - 1);
+            row.addView(down, new LinearLayout.LayoutParams(dp(38), dp(45)));
+            Button close = button("×", view -> {
+                closeOpenDocument(position);
+                dialog.dismiss();
+                showLibraryManager();
+            });
+            close.setContentDescription("Close " + session.name);
+            row.addView(close, new LinearLayout.LayoutParams(dp(38), dp(45)));
+        }
+        if (!recentDocuments.isEmpty()) {
+            TextView heading = text("RECENTLY CLOSED", 11, colors.mutedText, true);
+            heading.setPadding(0, dp(14), 0, dp(7));
+            list.addView(heading);
+            for (DocumentSession recent : new ArrayList<>(recentDocuments)) {
+                TextView name = text(shortName(recent.name) + "  ·  Page " +
+                    (recent.page + 1) + "    ↗", 13, colors.foreground, false);
+                name.setGravity(Gravity.CENTER_VERTICAL);
+                name.setPadding(dp(6), dp(4), dp(6), dp(4));
+                list.addView(name, new LinearLayout.LayoutParams(-1, dp(47)));
+                name.setOnClickListener(view -> {
+                    recentDocuments.remove(recent);
+                    documents.add(recent);
+                    scheduleLibrarySave();
+                    dialog.dismiss();
+                    switchDocument(documents.size() - 1);
+                });
+            }
+        }
+        dialog.show();
     }
 
     private String shortName(String name) {
@@ -719,8 +883,11 @@ public class MainActivity extends Activity {
             for (int i = 0; i < pageOrder.size(); i++)
                 items.add("Page " + (i + 1));
         } else {
-            for (DocumentSession session : documents)
-                items.add(shortName(session.name));
+            for (int i = 0; i < documents.size(); i++) {
+                DocumentSession session = documents.get(i);
+                items.add((i == activeDocument ? "● " : "") +
+                    shortName(session.name) + "  · p " + (session.page + 1));
+            }
         }
         if (items.isEmpty()) return;
 
@@ -743,7 +910,7 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
             Math.min(dp(292), availableWidth), Math.min(dp(376), availableHeight),
             Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        params.bottomMargin = dp(116);
+        params.bottomMargin = dp(108);
         overlay.addView(card, params);
         card.setTranslationY(dp(12));
 
@@ -782,6 +949,13 @@ public class MainActivity extends Activity {
                 chooseDocument();
             });
             card.addView(add, new LinearLayout.LayoutParams(-1, dp(43)));
+            TextView manage = text("Manage open PDFs", 13, Color.WHITE, true);
+            manage.setGravity(Gravity.CENTER);
+            manage.setOnClickListener(view -> {
+                dismissWheel();
+                showLibraryManager();
+            });
+            card.addView(manage, new LinearLayout.LayoutParams(-1, dp(40)));
         } else {
             // Same vertical wheel center for documents and pages.
             card.addView(new View(this), new LinearLayout.LayoutParams(-1, dp(43)));
@@ -1185,7 +1359,13 @@ public class MainActivity extends Activity {
             if (existing >= 0) {
                 if (firstNew < 0) firstNew = existing;
             } else {
-                documents.add(new DocumentSession(uri, getDocumentName(uri)));
+                DocumentSession previous = null;
+                for (DocumentSession item : recentDocuments) {
+                    if (item.uri.equals(uri)) { previous = item; break; }
+                }
+                if (previous != null) recentDocuments.remove(previous);
+                documents.add(previous == null ?
+                    new DocumentSession(uri, getDocumentName(uri)) : previous);
                 if (firstNew < 0) firstNew = documents.size() - 1;
             }
         }
@@ -1199,6 +1379,310 @@ public class MainActivity extends Activity {
         current.order.clear();
         current.order.addAll(pageOrder);
         current.page = pageIndex;
+        current.progress = pdfPages == null ? pageIndex :
+            Math.max(0f, pdfPages.getReadingProgress());
+        scheduleLibrarySave();
+    }
+
+    private void scheduleLibrarySave() {
+        if (restoringLibrary || host == null) return;
+        uiHandler.removeCallbacks(saveLibraryRunnable);
+        uiHandler.postDelayed(saveLibraryRunnable, 800);
+    }
+
+    private void addToRecent(DocumentSession session) {
+        if (session == null) return;
+        recentDocuments.removeIf(item -> item.uri.equals(session.uri));
+        recentDocuments.add(0, session);
+        while (recentDocuments.size() > 12)
+            recentDocuments.remove(recentDocuments.size() - 1);
+        scheduleLibrarySave();
+    }
+
+    private JSONObject sessionJson(DocumentSession session) throws JSONException {
+        JSONObject item = new JSONObject();
+        item.put("uri", session.uri.toString());
+        item.put("name", session.name);
+        item.put("page", session.page);
+        item.put("progress", session.progress);
+        JSONArray order = new JSONArray();
+        for (Integer page : session.order) order.put(page);
+        item.put("order", order);
+        JSONArray marks = new JSONArray();
+        for (Integer page : session.bookmarks) marks.put(page);
+        item.put("bookmarks", marks);
+        return item;
+    }
+
+    private DocumentSession sessionFromJson(JSONObject entry) {
+        if (entry == null) return null;
+        String value = entry.optString("uri", "");
+        if (value.isEmpty()) return null;
+        DocumentSession session = new DocumentSession(
+            Uri.parse(value), entry.optString("name", "document.pdf"));
+        session.page = Math.max(0, entry.optInt("page", 0));
+        session.progress = (float)entry.optDouble("progress", session.page);
+        JSONArray order = entry.optJSONArray("order");
+        if (order != null)
+            for (int j = 0; j < order.length(); j++) session.order.add(order.optInt(j));
+        JSONArray marks = entry.optJSONArray("bookmarks");
+        if (marks != null)
+            for (int j = 0; j < marks.length(); j++) session.bookmarks.add(marks.optInt(j));
+        return session;
+    }
+
+    private void persistLibrary() {
+        if (restoringLibrary) return;
+        try {
+            JSONArray items = new JSONArray();
+            for (DocumentSession session : documents) items.put(sessionJson(session));
+            JSONArray recent = new JSONArray();
+            for (DocumentSession session : recentDocuments) recent.put(sessionJson(session));
+            JSONObject state = new JSONObject();
+            state.put("active", activeDocument);
+            state.put("documents", items);
+            state.put("recent", recent);
+            getSharedPreferences(LIBRARY_PREF, MODE_PRIVATE).edit()
+                .putString("state", state.toString()).apply();
+        } catch (JSONException ignored) { }
+    }
+
+    private void restoreSavedLibrary() {
+        String saved = getSharedPreferences(LIBRARY_PREF, MODE_PRIVATE)
+            .getString("state", null);
+        if (saved == null || !documents.isEmpty()) return;
+        restoringLibrary = true;
+        try {
+            JSONObject state = new JSONObject(saved);
+            JSONArray items = state.optJSONArray("documents");
+            if (items == null) return;
+            for (int i = 0; i < items.length(); i++) {
+                DocumentSession session = sessionFromJson(items.optJSONObject(i));
+                if (session != null) documents.add(session);
+            }
+            JSONArray recent = state.optJSONArray("recent");
+            if (recent != null) {
+                for (int i = 0; i < recent.length(); i++) {
+                    DocumentSession session = sessionFromJson(recent.optJSONObject(i));
+                    if (session != null) recentDocuments.add(session);
+                }
+            }
+            if (!documents.isEmpty())
+                switchDocument(Math.max(0, Math.min(documents.size() - 1,
+                    state.optInt("active", 0))));
+        } catch (JSONException ignored) { }
+        finally { restoringLibrary = false; }
+    }
+
+    /** PDF outlines are indexed off-thread and cached with each open document. */
+    private void loadChapters(DocumentSession session) {
+        if (session.chaptersLoaded || session.chaptersLoading) return;
+        session.chaptersLoading = true;
+        chapterWorker.execute(() -> {
+            try {
+                List<DocumentIndex.Chapter> found =
+                    DocumentIndex.chapters(getContentResolver(), session.uri);
+                runOnUiThread(() -> {
+                    if (!documents.contains(session)) return;
+                    session.chapters.clear();
+                    for (DocumentIndex.Chapter part : found) {
+                        session.chapters.add(new Chapter(part.title, part.originalPage));
+                    }
+                    session.chaptersLoading = false;
+                    session.chaptersLoaded = true;
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    session.chaptersLoading = false;
+                    session.chaptersLoaded = true;
+                });
+            }
+        });
+    }
+
+    private void goToOriginalPage(int original) {
+        int position = pageOrder.indexOf(original);
+        if (position < 0 || !ready()) return;
+        pageIndex = position;
+        pdfPages.scrollToPage(position);
+        refreshUI();
+        if (hapticsEnabled && pageSelector != null)
+            pageSelector.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);
+    }
+
+    private void toggleBookmark() {
+        if (!ready()) return;
+        DocumentSession session = documents.get(activeDocument);
+        int original = pageOrder.get(pageIndex);
+        if (!session.bookmarks.add(original)) session.bookmarks.remove(original);
+        scheduleLibrarySave();
+        toast(session.bookmarks.contains(original) ? "Page bookmarked" : "Bookmark removed");
+    }
+
+    private void showBookmarksAndChapters() {
+        if (!ready()) return;
+        DocumentSession session = documents.get(activeDocument);
+        ArrayList<String> labels = new ArrayList<>();
+        ArrayList<Integer> targets = new ArrayList<>();
+        int original = pageOrder.get(pageIndex);
+        labels.add(session.bookmarks.contains(original)
+            ? "★ Remove bookmark from current page" : "☆ Bookmark current page");
+        targets.add(-1);
+
+        ArrayList<Integer> ordered = new ArrayList<>(session.bookmarks);
+        ordered.sort((a, b) -> Integer.compare(pageOrder.indexOf(a), pageOrder.indexOf(b)));
+        for (int id : ordered) {
+            int display = pageOrder.indexOf(id);
+            if (display < 0) continue;
+            labels.add("★  Page " + (display + 1));
+            targets.add(id);
+        }
+        if (session.chapters.isEmpty()) {
+            labels.add(session.chaptersLoaded ? "No embedded chapter outline" :
+                "Loading chapter outline…");
+            targets.add(-2);
+        } else {
+            labels.add("— CHAPTERS —");
+            targets.add(-2);
+            for (Chapter part : session.chapters) {
+                int display = pageOrder.indexOf(part.originalPage);
+                if (display < 0) continue;
+                labels.add(part.title + "  · " + (display + 1));
+                targets.add(part.originalPage);
+            }
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("Bookmarks & chapters")
+            .setItems(labels.toArray(new String[0]), (dialog, selected) -> {
+                int destination = targets.get(selected);
+                if (destination == -1) toggleBookmark();
+                else if (destination >= 0) goToOriginalPage(destination);
+            })
+            .setPositiveButton("Manage PDFs", (dialog, index) -> showLibraryManager())
+            .setNegativeButton("Close", null)
+            .show();
+    }
+
+    private void searchPdf() {
+        if (!ready()) return;
+        if (searchDialog != null && searchDialog.isShowing()) return;
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setPadding(dp(18), dp(12), dp(18), dp(10));
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setTextSize(16);
+        input.setHint("Find words in this PDF");
+        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        container.addView(input, new LinearLayout.LayoutParams(-1, dp(50)));
+
+        TextView status = text("Enter at least two characters", 12,
+            colors.mutedText, false);
+        status.setPadding(dp(2), dp(7), 0, dp(8));
+        container.addView(status, new LinearLayout.LayoutParams(-1, dp(35)));
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        LinearLayout matches = new LinearLayout(this);
+        matches.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(matches, new android.widget.ScrollView.LayoutParams(-1, -2));
+        container.addView(scroll, new LinearLayout.LayoutParams(-1, dp(340)));
+
+        searchDialog = new AlertDialog.Builder(this)
+            .setTitle("Search PDF")
+            .setView(container)
+            .setPositiveButton("Close", (dialog, button) -> { })
+            .create();
+        final Uri source = sourceUri;
+        searchDialog.setOnDismissListener(dialog -> {
+            searchGeneration++;
+            if (searchDebounce != null) uiHandler.removeCallbacks(searchDebounce);
+            searchDialog = null;
+        });
+        input.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start,
+                                                      int count, int after) { }
+            @Override public void onTextChanged(CharSequence text, int start,
+                                                 int before, int count) {
+                if (searchDebounce != null) uiHandler.removeCallbacks(searchDebounce);
+                final String query = text.toString().trim();
+                final int generation = ++searchGeneration;
+                matches.removeAllViews();
+                if (query.length() < 2) {
+                    status.setText("Enter at least two characters");
+                    pdfPages.setSearchHighlights(null);
+                    return;
+                }
+                status.setText("Searching selectable PDF text…");
+                searchDebounce = () -> indexWorker.execute(() -> {
+                    if (generation != searchGeneration) return;
+                    DocumentIndex.SearchResult result = null;
+                    String error = null;
+                    try {
+                        result = DocumentIndex.search(getContentResolver(),
+                            source, query, () -> generation != searchGeneration);
+                    } catch (Exception ex) {
+                        error = errorMessage(ex);
+                    }
+                    final DocumentIndex.SearchResult readyResult = result;
+                    final String failure = error;
+                    runOnUiThread(() -> {
+                        if (generation != searchGeneration || searchDialog == null ||
+                            !source.equals(sourceUri)) return;
+                        matches.removeAllViews();
+                        if (readyResult == null) {
+                            status.setText("Search failed: " + failure);
+                            return;
+                        }
+                        activeSearch = readyResult;
+                        pdfPages.setSearchHighlights(readyResult.highlights);
+                        status.setText(readyResult.matches.size() + " match(es)" +
+                            (readyResult.truncated ? " · first 200 shown" : "") +
+                            " · " + readyResult.pagesScanned + " pages scanned");
+                        int limit = Math.min(readyResult.matches.size(), 70);
+                        for (int j = 0; j < limit; j++) {
+                            DocumentIndex.Match match = readyResult.matches.get(j);
+                            int displayed = pageOrder.indexOf(match.originalPage);
+                            if (displayed < 0) continue;
+                            TextView row = text("Page " + (displayed + 1) +
+                                "    " + match.snippet, 13, colors.foreground, false);
+                            row.setPadding(dp(9), dp(11), dp(9), dp(11));
+                            row.setOnClickListener(view -> {
+                                goToOriginalPage(match.originalPage);
+                                if (searchDialog != null) searchDialog.dismiss();
+                            });
+                            matches.addView(row, new LinearLayout.LayoutParams(-1, -2));
+                        }
+                        if (readyResult.matches.isEmpty()) {
+                            TextView none = text("No matches in the text layer. Scanned PDFs require OCR.",
+                                13, colors.mutedText, false);
+                            none.setPadding(dp(8), dp(12), dp(8), dp(12));
+                            matches.addView(none);
+                        }
+                    });
+                });
+                uiHandler.postDelayed(searchDebounce, 330);
+            }
+            @Override public void afterTextChanged(android.text.Editable edit) { }
+        });
+        searchDialog.show();
+    }
+
+    private void restoreRecentOnly() {
+        String saved = getSharedPreferences(LIBRARY_PREF, MODE_PRIVATE)
+            .getString("state", null);
+        if (saved == null) return;
+        try {
+            JSONArray recent = new JSONObject(saved).optJSONArray("recent");
+            if (recent == null) return;
+            for (int i = 0; i < recent.length(); i++) {
+                DocumentSession session = sessionFromJson(recent.optJSONObject(i));
+                if (session != null && !recentDocuments.contains(session)) {
+                    boolean alreadyOpen = false;
+                    for (DocumentSession open : documents)
+                        if (open.uri.equals(session.uri)) { alreadyOpen = true; break; }
+                    if (!alreadyOpen) recentDocuments.add(session);
+                }
+            }
+        } catch (JSONException ignored) { }
     }
 
     private void cancelRequestedDocumentSwitch() {
@@ -1214,6 +1698,9 @@ public class MainActivity extends Activity {
                                      PdfRenderer opened) {
         DocumentSession chosen = documents.get(position);
         saveActiveSession();
+        searchGeneration++; // Cancel any search against the old document.
+        if (searchDialog != null) searchDialog.dismiss();
+        activeSearch = null;
         closeDocument();
         sourceFd = descriptor;
         renderer = opened;
@@ -1237,13 +1724,18 @@ public class MainActivity extends Activity {
             Math.max(0, Math.min(pageOrder.size() - 1, chosen.page));
         // Bind and restore atomically; the old setDocument() forced a page-1
         // callback before this value could be applied.
-        pdfPages.setDocument(renderer, pageOrder, pageIndex);
+        float restoredProgress = Float.isFinite(chosen.progress)
+            ? Math.max(0f, Math.min(pageOrder.size() - 1f, chosen.progress)) : pageIndex;
+        int firstVisible = Math.max(0, (int)Math.floor(restoredProgress));
+        pdfPages.setDocument(renderer, pageOrder, firstVisible, restoredProgress);
         if (emptyView != null) emptyView.setVisibility(View.GONE);
         if (!chromeVisible) {
             chromeVisible = true;
             applyChrome();
         }
         refreshUI();
+        scheduleLibrarySave();
+        loadChapters(chosen);
     }
 
     /** Normal tap selection may open immediately; finger-driven changes use
@@ -1328,6 +1820,8 @@ public class MainActivity extends Activity {
         cancelRequestedDocumentSwitch();
         dismissDragPreview(false);
         dismissWheel();
+        saveActiveSession();
+        for (DocumentSession item : documents) addToRecent(item);
         closeDocument();
         documents.clear();
         activeDocument = -1;
@@ -1336,6 +1830,7 @@ public class MainActivity extends Activity {
         pageIndex = 0;
         documentName = "document.pdf";
         refreshUI();
+        scheduleLibrarySave();
     }
 
     private void closeDocument() {
@@ -1625,6 +2120,8 @@ public class MainActivity extends Activity {
             item.putString("name", session.name);
             item.putIntegerArrayList("order", new ArrayList<>(session.order));
             item.putInt("page", session.page);
+            item.putFloat("progress", session.progress);
+            item.putIntegerArrayList("bookmarks", new ArrayList<>(session.bookmarks));
             entries.add(item);
         }
         state.putParcelableArrayList("open_documents", entries);
@@ -1635,10 +2132,22 @@ public class MainActivity extends Activity {
         super.onConfigurationChanged(config);
     }
 
+    @Override protected void onStop() {
+        saveActiveSession();
+        uiHandler.removeCallbacks(saveLibraryRunnable);
+        persistLibrary();
+        super.onStop();
+    }
+
     @Override protected void onDestroy() {
+        uiHandler.removeCallbacks(saveLibraryRunnable);
         cancelRequestedDocumentSwitch();
         dismissDragPreview(false);
         documentWorker.shutdownNow();
+        searchGeneration++;
+        if (searchDialog != null) searchDialog.dismiss();
+        indexWorker.shutdownNow();
+        chapterWorker.shutdownNow();
         if (editOverlay != null) {
             editOverlay.animate().cancel();
             host.removeView(editOverlay);

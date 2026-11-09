@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main, dev/v2-focus-zoom-session-restore]
+    branches: [main, dev/v1.11-reading-workflow]
   workflow_dispatch:
 
 permissions:

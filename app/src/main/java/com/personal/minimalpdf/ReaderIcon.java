@@ -13,7 +13,8 @@ public final class ReaderIcon extends View {
     public static final String BACK = "back", OPEN = "open", ZOOM = "zoom",
         SHARE = "share", MORE = "more", PAGES = "pages", MOVE = "move",
         EXTRACT = "extract", DELETE = "delete", SAVE = "save", RESET = "reset",
-        CLOSE = "close", PREVIOUS = "previous", NEXT = "next";
+        CLOSE = "close", PREVIOUS = "previous", NEXT = "next",
+        SEARCH = "search", BOOKMARK = "bookmark";
 
     private final String symbol;
     private final Paint ink = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -64,6 +65,15 @@ public final class ReaderIcon extends View {
                 line(raw, 8, 11, 16, 6); line(raw, 8, 13, 16, 18);
                 circle(raw, 6, 12, 2.3f); circle(raw, 18, 5, 2.3f);
                 circle(raw, 18, 19, 2.3f);
+                break;
+            case SEARCH:
+                circle(raw, 10.5f, 10.5f, 6.5f);
+                line(raw, 15.5f, 15.5f, 21, 21);
+                break;
+            case BOOKMARK:
+                line(raw, 6, 3, 18, 3); line(raw, 18, 3, 18, 21);
+                line(raw, 18, 21, 12, 17); line(raw, 12, 17, 6, 21);
+                line(raw, 6, 21, 6, 3);
                 break;
             case ZOOM:
                 circle(raw, 10.5f, 10.5f, 6.5f);

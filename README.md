@@ -23,10 +23,9 @@ A minimal offline Android PDF reader and page organizer for personal use. No acc
 - Normal continuous scrolling no longer supports zoom; pinch and zoom presets are available in focused single-page mode only
 - Import multiple PDFs in one picker action, switch between them, and retain each PDF's in-progress page ordering and reading position across switches
 - Fast 165–185 ms hide/show and focused-page transitions that do not resize the reading area
-- Normal continuous-reader pinch zoom coalesced to one layout update per animation frame, preserving the zoom focal point
 - Borderless, simplified page and document controls
 - Scroll vertically through the entire PDF continuously, with pages rendered lazily for memory efficiency
-- Pinch to zoom (and pan horizontally when zoomed in), or jump using **Pages**
+- Pinch to zoom and pan in **focus mode**. Normal continuous reading remains unzoomed.
 - **Move to…** reposition the current page anywhere in the PDF
 - **Remove** a page from the output, or **Reset** to restore the original order
 - **Extract** a 1-based inclusive range such as pages **10–20** into a separate PDF
@@ -47,3 +46,13 @@ Requires Android 8.0 or newer.
 - A one-finger left/right swipe changes focused pages at every zoom level. Fast horizontal gestures navigate; slower movements can still pan zoomed content.
 - Changing a focused page preserves the selected zoom, rather than resetting to 150% after every swipe.
 - Switching between opened PDFs restores each document's previous page and its in-progress page ordering; document binding no longer announces page one before restoring the saved position.
+
+## v1.11 reading workflow
+
+- Reopen recent PDFs after app relaunch, remembering page order, bookmarks and exact within-page reading progress; Android persistable file permissions required for automatic reopen
+- Bottom selector labels retain drag-to-switch and drag-to-page navigation; the action bar now contains Search, Bookmarks, Edit and Share rather than duplicate PDF/Page buttons
+- Offline search in selectable PDF text, with asynchronous match extraction, page result list and visual match highlights; image-only scans are not OCRed
+- Persistent per-document page bookmarks and embedded chapter outline navigation
+- Document manager for reordering and closing open PDFs while preserving their respective reading positions; active document and last-read pages are visible
+- Optional, throttled haptic feedback for selection changes
+- Fixed overlays and near-zero reading padding so hiding the toolbars reveals the complete reading area without content resizing
