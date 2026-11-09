@@ -157,7 +157,9 @@ public class ReaderGestureTest {
                     HorizontalScrollView pan =
                         (HorizontalScrollView) field(activity, "normalPan");
                     PdfPageList pages = (PdfPageList) field(activity, "pdfPages");
-                    assertTrue("Rendered PDF page did not grow after pinch",
+                    assertTrue("Rendered PDF width still unchanged: list="
+                        + pages.getWidth() + " viewport=" + pan.getWidth()
+                        + " zoom=" + pages.getZoom(),
                         pages.getWidth() > pan.getWidth());
                 } catch (Exception e) { throw new AssertionError(e); }
             });
