@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main, dev/page-scrub-multi-pdf]
+    branches: [main, dev/edit-menu-direct-scrub-zoom]
   workflow_dispatch:
 
 jobs:

@@ -88,6 +88,8 @@ public class MainActivity extends Activity {
     private TextView pageSelector;
     private FrameLayout wheelOverlay;
     private PickerWheel pickerWheel;
+    private boolean editMenuOpen;
+    private FrameLayout editOverlay;
     private int barBackground, barForeground, barMuted;
     private boolean busy = false;
 
@@ -339,6 +341,7 @@ public class MainActivity extends Activity {
         documentSelector.setEllipsize(android.text.TextUtils.TruncateAt.END);
         documentSelector.setContentDescription("Choose loaded PDF");
         documentSelector.setOnClickListener(view -> showWheel(false));
+        documentSelector.setOnTouchListener(new DirectWheelGesture(false));
         paging.addView(documentSelector, new LinearLayout.LayoutParams(0, dp(42), 1));
 
         pageSelector = text("— / — ▾", 12, barForeground, true);
@@ -346,6 +349,7 @@ public class MainActivity extends Activity {
         pageSelector.setGravity(Gravity.CENTER);
         pageSelector.setContentDescription("Scroll to select a page");
         pageSelector.setOnClickListener(view -> showWheel(true));
+        pageSelector.setOnTouchListener(new DirectWheelGesture(true));
         LinearLayout.LayoutParams pageParams = new LinearLayout.LayoutParams(dp(100), dp(42));
         pageParams.leftMargin = dp(4);
         paging.addView(pageSelector, pageParams);
@@ -370,12 +374,12 @@ public class MainActivity extends Activity {
         actions.setGravity(Gravity.CENTER);
         actions.setPadding(dp(4), dp(1), dp(4), dp(3));
         footer.addView(actions, new LinearLayout.LayoutParams(-1, dp(67)));
-        addAction(actions, ReaderIcon.PAGES, "Pages", view -> showPages());
-        addAction(actions, ReaderIcon.MOVE, "Move", view -> movePage());
-        addAction(actions, ReaderIcon.EXTRACT, "Extract", view -> extractPages());
-        addAction(actions, ReaderIcon.DELETE, "Remove", view -> removeCurrentPage());
-        saveButton = addAction(actions, ReaderIcon.SAVE, "Save", view ->
-            chooseSaveDestination(new ArrayList<>(pageOrder), "-edited"));
+        addAction(actions, ReaderIcon.PAGES, "Pages", view -> showWheel(true));
+        addAction(actions, ReaderIcon.OPEN, "PDFs", view -> showWheel(false));
+        addAction(actions, ReaderIcon.ZOOM, "Zoom", view -> chooseZoom(false));
+        addAction(actions, ReaderIcon.SHARE, "Share", view ->
+            sharePages(new ArrayList<>(pageOrder)));
+        saveButton = addAction(actions, ReaderIcon.MOVE, "Edit", view -> showEditMenu());
 
         refreshUI();
     }
@@ -402,9 +406,131 @@ public class MainActivity extends Activity {
         return icon;
     }
 
+    private void showEditMenu() {
+        if (!ready()) return;
+        if (editOverlay != null) return;
+        FrameLayout overlay = new FrameLayout(this);
+        editOverlay = overlay;
+        overlay.setBackgroundColor(Color.argb(110, 0, 0, 0));
+        overlay.setOnClickListener(v -> dismissEditMenu());
+        overlay.setAlpha(0f);
+        host.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setPadding(dp(18), dp(14), dp(18), dp(24));
+        sheet.setBackground(colors.rounded(this, barBackground,
+            Color.TRANSPARENT, 20));
+        FrameLayout.LayoutParams sheetParams = new FrameLayout.LayoutParams(
+            -1, -2, Gravity.BOTTOM);
+        overlay.addView(sheet, sheetParams);
+
+        TextView heading = text("Edit PDF", 19, barForeground, true);
+        heading.setPadding(dp(8), dp(4), 0, dp(14));
+        sheet.addView(heading, new LinearLayout.LayoutParams(-1, dp(52)));
+
+        editOption(sheet, "Rearrange pages", "Change the position of a page",
+            () -> movePage());
+        editOption(sheet, "Extract pages", "Save or share a selected range",
+            () -> extractPages());
+        editOption(sheet, "Remove page", "Remove the current page from the edited copy",
+            () -> removeCurrentPage());
+        editOption(sheet, "Reset pages", "Restore the original page order",
+            () -> resetPages());
+        editOption(sheet, "Save edited copy", "Export your changes as a new PDF",
+            () -> chooseSaveDestination(new ArrayList<>(pageOrder), "-edited"));
+        overlay.animate().alpha(1f).setDuration(155).start();
+    }
+
+    private void editOption(LinearLayout sheet, String name, String description,
+                            Runnable action) {
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setPadding(dp(12), dp(8), dp(12), dp(8));
+        TextView title = text(name, 15, barForeground, true);
+        item.addView(title, new LinearLayout.LayoutParams(-1, dp(27)));
+        TextView sub = text(description, 12, barMuted, false);
+        item.addView(sub, new LinearLayout.LayoutParams(-1, dp(23)));
+        item.setOnClickListener(v -> {
+            dismissEditMenu();
+            action.run();
+        });
+        sheet.addView(item, new LinearLayout.LayoutParams(-1, dp(68)));
+    }
+
+    private void dismissEditMenu() {
+        FrameLayout overlay = editOverlay;
+        editOverlay = null;
+        if (overlay == null) return;
+        overlay.animate().cancel();
+        overlay.animate().alpha(0f).setDuration(130)
+            .withEndAction(() -> {
+                if (host != null && overlay.getParent() == host)
+                    host.removeView(overlay);
+            }).start();
+    }
+
+    /** A vertical swipe directly on the bottom-left label opens the same wheel
+     * and preselects the swiped-to item; tapping still opens the wheel normally. */
+    private final class DirectWheelGesture implements View.OnTouchListener {
+        private final boolean pages;
+        private float startY;
+        private boolean dragging;
+        private int initial;
+        private int selection;
+        private final int threshold = dp(7);
+
+        DirectWheelGesture(boolean pages) { this.pages = pages; }
+
+        @Override public boolean onTouch(View view, android.view.MotionEvent event) {
+            if (!ready()) return false;
+            switch (event.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    startY = event.getRawY();
+                    initial = pages ? pageIndex : activeDocument;
+                    selection = initial;
+                    dragging = false;
+                    return true;
+                case android.view.MotionEvent.ACTION_MOVE:
+                    float distance = startY - event.getRawY();
+                    if (Math.abs(distance) > threshold) dragging = true;
+                    if (dragging) {
+                        int max = pages ? pageOrder.size() : documents.size();
+                        selection = Math.max(0, Math.min(max - 1,
+                            initial + Math.round(distance / dp(28))));
+                        if (pages) {
+                            pageSelector.setText((selection + 1) + " / " + pageOrder.size() + " ▾");
+                        } else {
+                            documentSelector.setText(shortName(documents.get(selection).name) + " ▾");
+                        }
+                    }
+                    return true;
+                case android.view.MotionEvent.ACTION_UP:
+                    if (dragging) {
+                        if (pages) {
+                            pageIndex = selection;
+                            pdfPages.scrollToPage(selection);
+                            refreshUI();
+                        } else {
+                            switchDocument(selection);
+                        }
+                        // Keep the wheel available for precise corrections.
+                        showWheel(pages);
+                    } else {
+                        view.performClick();
+                    }
+                    return true;
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    refreshUI();
+                    return true;
+            }
+            return true;
+        }
+    }
+
     private void showReaderMenu(View anchor) {
         android.widget.PopupMenu popup = new android.widget.PopupMenu(this, anchor);
-        popup.getMenu().add(0, 1, 0, "Save edited copy");
+        popup.getMenu().add(0, 1, 0, "Edit PDF");
         popup.getMenu().add(0, 2, 1, "Reset page order");
         popup.getMenu().add(0, 3, 2, "Add more PDFs");
         popup.getMenu().add(0, 4, 3, "Switch PDF");
@@ -412,7 +538,7 @@ public class MainActivity extends Activity {
         popup.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
                 case 1:
-                    if (ready()) chooseSaveDestination(new ArrayList<>(pageOrder), "-edited");
+                    showEditMenu();
                     return true;
                 case 2:
                     resetPages();
@@ -746,7 +872,9 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (wheelOverlay != null) {
+        if (editOverlay != null) {
+            dismissEditMenu();
+        } else if (wheelOverlay != null) {
             dismissWheel();
         } else if (focusOverlay != null) {
             closeFocus();
@@ -1213,6 +1341,11 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        if (editOverlay != null) {
+            editOverlay.animate().cancel();
+            host.removeView(editOverlay);
+            editOverlay = null;
+        }
         if (wheelOverlay != null) {
             wheelOverlay.animate().cancel();
             host.removeView(wheelOverlay);
