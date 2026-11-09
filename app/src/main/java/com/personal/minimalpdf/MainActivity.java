@@ -468,6 +468,174 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * Tap to open the wheel, or drag vertically over the collapsed value
+     * to operate the very same wheel without a preliminary tap.
+     */
+    private void enableSelectorScrub(TextView target, boolean pages) {
+        final float slop = android.view.ViewConfiguration.get(this).getScaledTouchSlop();
+        target.setOnTouchListener(new View.OnTouchListener() {
+            private float downY, previousY;
+            private boolean dragging;
+            private android.view.VelocityTracker tracker;
+
+            private void recycle() {
+                if (tracker != null) { tracker.recycle(); tracker = null; }
+            }
+
+            @Override public boolean onTouch(View view, android.view.MotionEvent event) {
+                if (!ready()) return true;
+                int action = event.getActionMasked();
+                float rawY = event.getRawY();
+                switch (action) {
+                    case android.view.MotionEvent.ACTION_DOWN:
+                        recycle();
+                        tracker = android.view.VelocityTracker.obtain();
+                        tracker.addMovement(event);
+                        downY = previousY = rawY;
+                        dragging = false;
+                        if (view.getParent() != null)
+                            view.getParent().requestDisallowInterceptTouchEvent(true);
+                        return true;
+                    case android.view.MotionEvent.ACTION_MOVE:
+                        if (tracker != null) tracker.addMovement(event);
+                        if (!dragging && Math.abs(rawY - downY) > slop) {
+                            dragging = true;
+                            showWheel(pages);
+                            if (pickerWheel != null) pickerWheel.beginExternalDrag();
+                        }
+                        if (dragging && pickerWheel != null)
+                            pickerWheel.dragExternal(rawY - previousY);
+                        previousY = rawY;
+                        return true;
+                    case android.view.MotionEvent.ACTION_UP:
+                        if (!dragging) {
+                            view.performClick();
+                        } else if (pickerWheel != null) {
+                            pickerWheel.dragExternal(rawY - previousY);
+                            float velocity = 0f;
+                            if (tracker != null) {
+                                tracker.addMovement(event);
+                                tracker.computeCurrentVelocity(1000);
+                                velocity = tracker.getYVelocity();
+                            }
+                            pickerWheel.endExternalDrag(velocity);
+                        }
+                        dragging = false;
+                        recycle();
+                        return true;
+                    case android.view.MotionEvent.ACTION_CANCEL:
+                        if (dragging && pickerWheel != null)
+                            pickerWheel.cancelExternalDrag();
+                        dragging = false;
+                        recycle();
+                        return true;
+                }
+                return true;
+            }
+        });
+    }
+
+    private void showEditMenu() {
+        if (!ready()) return;
+        dismissWheel();
+        if (editOverlay != null) return;
+        final FrameLayout overlay = new FrameLayout(this);
+        editOverlay = overlay;
+        overlay.setBackgroundColor(Color.argb(148, 0, 0, 0));
+        overlay.setOnClickListener(view -> dismissEditMenu(null));
+        overlay.setAlpha(0f);
+        host.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setClickable(true);
+        sheet.setElevation(dp(14));
+        sheet.setBackground(colors.rounded(this, Color.rgb(27, 29, 34),
+            Color.TRANSPARENT, 20));
+        int available = getResources().getDisplayMetrics().heightPixels - dp(95);
+        FrameLayout.LayoutParams sheetParams = new FrameLayout.LayoutParams(
+            -1, Math.min(dp(452), Math.max(dp(240), available)), Gravity.BOTTOM);
+        overlay.addView(sheet, sheetParams);
+
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        titleRow.setPadding(dp(21), dp(4), dp(13), 0);
+        sheet.addView(titleRow, new LinearLayout.LayoutParams(-1, dp(61)));
+        TextView heading = text("Edit PDF", 18, barForeground, true);
+        titleRow.addView(heading, new LinearLayout.LayoutParams(0, -1, 1));
+        ReaderIcon close = iconButton(ReaderIcon.CLOSE, "Close edit menu",
+            view -> dismissEditMenu(null));
+        titleRow.addView(close, new LinearLayout.LayoutParams(dp(46), dp(46)));
+
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.setFillViewport(false);
+        scroll.setVerticalScrollBarEnabled(false);
+        sheet.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout items = new LinearLayout(this);
+        items.setOrientation(LinearLayout.VERTICAL);
+        items.setPadding(dp(9), 0, dp(9), dp(15));
+        scroll.addView(items, new android.widget.ScrollView.LayoutParams(-1, -2));
+
+        addEditRow(items, ReaderIcon.MOVE, "Rearrange page",
+            "Move the current page to another position", this::movePage);
+        addEditRow(items, ReaderIcon.EXTRACT, "Extract pages",
+            "Save or share a selected page range", this::extractPages);
+        addEditRow(items, ReaderIcon.DELETE, "Remove page",
+            "Exclude this page from the edited copy", this::removeCurrentPage);
+        addEditRow(items, ReaderIcon.RESET, "Restore original pages",
+            "Discard in-session page changes", this::resetPages);
+        addEditRow(items, ReaderIcon.SAVE, "Save edited copy",
+            "Preserve the PDF content and selectable text",
+            () -> chooseSaveDestination(new ArrayList<>(pageOrder), "-edited"));
+
+        sheet.setTranslationY(dp(28));
+        overlay.animate().alpha(1f).setDuration(165).start();
+        sheet.animate().translationY(0f).setDuration(175)
+            .setInterpolator(new android.view.animation.DecelerateInterpolator(1.45f))
+            .start();
+    }
+
+    private void addEditRow(LinearLayout list, String symbol, String title,
+                            String description, Runnable action) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(8), 0, dp(10), 0);
+        row.setBackground(colors.rounded(this, Color.TRANSPARENT,
+            Color.TRANSPARENT, 11));
+        list.addView(row, new LinearLayout.LayoutParams(-1, dp(67)));
+        ReaderIcon icon = iconButton(symbol, title, view -> dismissEditMenu(action));
+        row.addView(icon, new LinearLayout.LayoutParams(dp(52), dp(52)));
+        LinearLayout labels = new LinearLayout(this);
+        labels.setOrientation(LinearLayout.VERTICAL);
+        labels.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(0, -1, 1);
+        labelParams.leftMargin = dp(5);
+        row.addView(labels, labelParams);
+        TextView name = text(title, 15, barForeground, true);
+        labels.addView(name, new LinearLayout.LayoutParams(-1, dp(27)));
+        TextView detail = text(description, 11, barMuted, false);
+        detail.setSingleLine(true);
+        detail.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        labels.addView(detail, new LinearLayout.LayoutParams(-1, dp(20)));
+        row.setOnClickListener(view -> dismissEditMenu(action));
+    }
+
+    private void dismissEditMenu(Runnable after) {
+        final FrameLayout overlay = editOverlay;
+        editOverlay = null;
+        if (overlay == null) {
+            if (after != null) after.run();
+            return;
+        }
+        overlay.animate().cancel();
+        overlay.animate().alpha(0f).setDuration(120)
+            .withEndAction(() -> {
+                if (host != null && overlay.getParent() == host) host.removeView(overlay);
+                if (after != null) after.run();
+            }).start();
+    }
+
     private void showWheel(boolean pages) {
         if (!ready()) return;
         dismissWheel();
