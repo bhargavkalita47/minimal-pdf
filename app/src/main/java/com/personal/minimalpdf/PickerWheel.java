@@ -154,6 +154,10 @@ public final class PickerWheel extends View {
         settleAt(Math.round(position + momentum), true);
     }
 
+    public void cancelExternalDrag() {
+        settleAt(Math.round(position), false);
+    }
+
     @Override public boolean onTouchEvent(MotionEvent event) {
         if (labels.isEmpty()) return false;
         switch (event.getActionMasked()) {
