@@ -70,3 +70,9 @@ Requires Android 8.0 or newer.
 - Custom red-and-white book/PDF launcher logo, packaged as a transparent drawable asset.
 - Android adaptive launcher icon uses a charcoal background and the book foreground, while a legacy layer-list icon provides a fallback.
 - The icon appears in the launcher, app drawer and Android application settings after installing v1.13.
+
+### Version 1.14 — unclipped pages and cleaned-up launcher icon
+
+- The continuous reader clips PDF pages to the unobscured viewport between the visible 59dp header and 103dp bottom toolbar, so text is not hidden under the interface.
+- A single tap still hides/shows the controls; the reader gains nearly the whole screen when they are hidden and preserves the scroll anchor when they return.
+- Replaced the old near-black adaptive icon background with a full-bleed light blush gradient, keeping the original red book logo clear on launcher shapes and avoiding dark empty borders.
