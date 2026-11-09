@@ -62,6 +62,7 @@ public class MainActivity extends Activity {
         final Set<Integer> bookmarks = new HashSet<>(); // Original page indexes
         final ArrayList<Chapter> chapters = new ArrayList<>();
         boolean chaptersLoaded;
+        boolean chaptersLoading;
         DocumentSession(Uri uri, String name) { this.uri = uri; this.name = name; }
     }
     private static final class Chapter {
@@ -79,6 +80,7 @@ public class MainActivity extends Activity {
     private boolean restoringLibrary;
     private volatile int searchGeneration;
     private final ExecutorService indexWorker = Executors.newSingleThreadExecutor();
+    private final ExecutorService chapterWorker = Executors.newSingleThreadExecutor();
     private android.app.AlertDialog searchDialog;
     private Runnable searchDebounce;
     private DocumentIndex.SearchResult activeSearch;
@@ -173,6 +175,7 @@ public class MainActivity extends Activity {
             applyChrome();
         }
         if (state == null) restoreSavedLibrary();
+        else restoreRecentOnly();
         Uri incoming = getIntent() == null ? null : getIntent().getData();
         if (incoming != null) addDocuments(java.util.Collections.singletonList(incoming));
         if (state != null) {
@@ -1473,9 +1476,9 @@ public class MainActivity extends Activity {
 
     /** PDF outlines are indexed off-thread and cached with each open document. */
     private void loadChapters(DocumentSession session) {
-        if (session.chaptersLoaded) return;
-        session.chaptersLoaded = true;
-        indexWorker.execute(() -> {
+        if (session.chaptersLoaded || session.chaptersLoading) return;
+        session.chaptersLoading = true;
+        chapterWorker.execute(() -> {
             try {
                 List<DocumentIndex.Chapter> found =
                     DocumentIndex.chapters(getContentResolver(), session.uri);
@@ -1485,8 +1488,15 @@ public class MainActivity extends Activity {
                     for (DocumentIndex.Chapter part : found) {
                         session.chapters.add(new Chapter(part.title, part.originalPage));
                     }
+                    session.chaptersLoading = false;
+                    session.chaptersLoaded = true;
                 });
-            } catch (Exception ignored) { }
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    session.chaptersLoading = false;
+                    session.chaptersLoaded = true;
+                });
+            }
         });
     }
 
@@ -1654,6 +1664,25 @@ public class MainActivity extends Activity {
             @Override public void afterTextChanged(android.text.Editable edit) { }
         });
         searchDialog.show();
+    }
+
+    private void restoreRecentOnly() {
+        String saved = getSharedPreferences(LIBRARY_PREF, MODE_PRIVATE)
+            .getString("state", null);
+        if (saved == null) return;
+        try {
+            JSONArray recent = new JSONObject(saved).optJSONArray("recent");
+            if (recent == null) return;
+            for (int i = 0; i < recent.length(); i++) {
+                DocumentSession session = sessionFromJson(recent.optJSONObject(i));
+                if (session != null && !recentDocuments.contains(session)) {
+                    boolean alreadyOpen = false;
+                    for (DocumentSession open : documents)
+                        if (open.uri.equals(session.uri)) { alreadyOpen = true; break; }
+                    if (!alreadyOpen) recentDocuments.add(session);
+                }
+            }
+        } catch (JSONException ignored) { }
     }
 
     private void cancelRequestedDocumentSwitch() {
@@ -2118,6 +2147,7 @@ public class MainActivity extends Activity {
         searchGeneration++;
         if (searchDialog != null) searchDialog.dismiss();
         indexWorker.shutdownNow();
+        chapterWorker.shutdownNow();
         if (editOverlay != null) {
             editOverlay.animate().cancel();
             host.removeView(editOverlay);
