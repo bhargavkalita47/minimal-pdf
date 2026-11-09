@@ -847,31 +847,63 @@ public class MainActivity extends Activity {
             .show();
     }
 
+    /** Swipes advance exactly one page in the continuous reader while a brief
+     * directional transition separates the old and new page. Vertical scroll
+     * remains uninterrupted. */
+    private void swipeNormalPage(int fromPosition, int direction) {
+        if (!ready() || focusOverlay != null) return;
+        int next = fromPosition + direction;
+        if (next < 0 || next >= pageOrder.size()) return;
+        pdfPages.animate().cancel();
+        pdfPages.animate()
+            .translationX(-direction * dp(13)).alpha(.83f).setDuration(85)
+            .withEndAction(() -> {
+                if (!ready() || focusOverlay != null) return;
+                pageIndex = next;
+                pdfPages.scrollToPage(next);
+                refreshUI();
+                pdfPages.setTranslationX(direction * dp(13));
+                pdfPages.animate().translationX(0).alpha(1f).setDuration(145)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator(1.4f))
+                    .start();
+            }).start();
+    }
+
     private void showFocus(int position) {
         if (!ready() || position < 0 || position >= pageOrder.size()) return;
         closeFocus(false);
-        final int originalPage = pageOrder.get(position);
-        final int request = ++focusGeneration;
-        final Uri source = sourceUri;
         focusOverlay = new FrameLayout(this);
-        // A dimmed scrim leaves the document visible beneath the lifted page.
         focusOverlay.setBackgroundColor(Color.argb(
             colors.dark ? 225 : 190, 14, 18, 25));
+
         focusPage = new FocusPageView(this, new FocusPageView.Actions() {
             @Override public void onDoubleTap() { closeFocus(); }
             @Override public void onSingleTap() {
                 if (focusToolbar != null) {
-                    focusToolbar.setVisibility(
-                        focusToolbar.getVisibility() == View.VISIBLE
-                            ? View.GONE : View.VISIBLE);
+                    focusToolbar.animate().cancel();
+                    boolean visible = focusToolbar.getVisibility() == View.VISIBLE;
+                    if (visible) {
+                        focusToolbar.animate().alpha(0f).translationY(-dp(12))
+                            .setDuration(145).withEndAction(() -> {
+                                if (focusToolbar != null) focusToolbar.setVisibility(View.GONE);
+                            }).start();
+                    } else {
+                        focusToolbar.setVisibility(View.VISIBLE);
+                        focusToolbar.setAlpha(0f);
+                        focusToolbar.setTranslationY(-dp(12));
+                        focusToolbar.animate().alpha(1f).translationY(0f)
+                            .setDuration(165).start();
+                    }
                 }
             }
             @Override public void onZoomChanged(float zoom) {
                 if (focusZoomButton != null) focusZoomButton.setText(zoomTitle(zoom));
             }
+            @Override public void onHorizontalSwipe(int direction) {
+                swipeFocusedPage(direction);
+            }
         });
         focusOverlay.addView(focusPage, new FrameLayout.LayoutParams(-1, -1));
-
         focusLoading = text("Loading page…", 14, Color.WHITE, false);
         focusLoading.setGravity(Gravity.CENTER);
         focusOverlay.addView(focusLoading,
@@ -888,9 +920,9 @@ public class MainActivity extends Activity {
             view -> closeFocus());
         bar.addView(close, new LinearLayout.LayoutParams(dp(48), dp(46)));
 
-        TextView title = text("Page " + (position + 1) + " of " + pageOrder.size(),
+        focusPageTitle = text("Page " + (position + 1) + " of " + pageOrder.size(),
             15, barForeground, true);
-        bar.addView(title, new LinearLayout.LayoutParams(0, -1, 1));
+        bar.addView(focusPageTitle, new LinearLayout.LayoutParams(0, -1, 1));
 
         focusZoomButton = button("100% ▾", v -> chooseZoom(true));
         focusZoomButton.setTextColor(barForeground);
@@ -904,10 +936,36 @@ public class MainActivity extends Activity {
         focusOverlay.animate().alpha(1f).setDuration(170)
             .setInterpolator(new android.view.animation.DecelerateInterpolator(1.4f))
             .start();
+        focusedBitmapReady = false;
+        renderFocusedPage(position, 0);
+    }
+
+    private void swipeFocusedPage(int direction) {
+        if (focusOverlay == null || focusPage == null || !ready()) return;
+        int target = focusedPosition + direction;
+        if (target < 0 || target >= pageOrder.size()) return;
+        pageIndex = target;
+        pdfPages.scrollToPage(target);
+        refreshUI();
+        renderFocusedPage(target, direction);
+    }
+
+    /** Keep the existing image visible during the next page's background render,
+     * then cross-slide by a few pixels without rebuilding the focus overlay. */
+    private void renderFocusedPage(int position, int direction) {
+        if (focusOverlay == null || position < 0 || position >= pageOrder.size()) return;
+        focusedPosition = position;
+        if (focusPageTitle != null)
+            focusPageTitle.setText("Page " + (position + 1) + " of " + pageOrder.size());
+        final int originalPage = pageOrder.get(position);
+        final int request = ++focusGeneration;
+        final Uri source = sourceUri;
+
         background.execute(() -> {
             Bitmap rendered = null;
             String error = null;
-            try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(source, "r")) {
+            try (ParcelFileDescriptor descriptor =
+                     getContentResolver().openFileDescriptor(source, "r")) {
                 if (descriptor == null) throw new Exception("Can't open PDF");
                 try (PdfRenderer focusedRenderer = new PdfRenderer(descriptor);
                      PdfRenderer.Page page = focusedRenderer.openPage(originalPage)) {
@@ -920,27 +978,51 @@ public class MainActivity extends Activity {
                     rendered.eraseColor(Color.WHITE);
                     page.render(rendered, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
                 }
-            } catch (Exception e) {
+            } catch (Exception ex) {
                 if (rendered != null) rendered.recycle();
                 rendered = null;
-                error = errorMessage(e);
+                error = errorMessage(ex);
             }
             final Bitmap result = rendered;
             final String message = error;
             runOnUiThread(() -> {
-                if (request != focusGeneration || focusOverlay == null || focusPage == null) {
+                if (request != focusGeneration || focusOverlay == null ||
+                    focusPage == null) {
                     if (result != null) result.recycle();
                     return;
                 }
-                if (result != null) {
-                    if (focusLoading != null) focusLoading.setVisibility(View.GONE);
-                    focusPage.setBitmap(result);
-                    focusPage.setAlpha(0f);
-                    focusPage.animate().alpha(1f).setDuration(160).start();
-                    focusPage.animateToZoom(1.5f);
-                } else {
-                    toast("Unable to focus page: " + message);
+                if (result == null) {
+                    toast("Unable to open focused page: " + message);
                     closeFocus();
+                    return;
+                }
+                final FocusPageView current = focusPage;
+                boolean first = !focusedBitmapReady;
+                focusedBitmapReady = true;
+                if (first || direction == 0) {
+                    if (focusLoading != null) focusLoading.setVisibility(View.GONE);
+                    current.setBitmap(result);
+                    current.setAlpha(0f);
+                    current.animate().alpha(1f).setDuration(170).start();
+                    current.animateToZoom(1.5f);
+                } else {
+                    current.animate().cancel();
+                    current.animate().alpha(.58f)
+                        .translationX(-direction * dp(20)).setDuration(90)
+                        .withEndAction(() -> {
+                            if (focusPage != current || request != focusGeneration) {
+                                result.recycle();
+                                return;
+                            }
+                            if (focusLoading != null) focusLoading.setVisibility(View.GONE);
+                            current.setBitmap(result);
+                            current.setTranslationX(direction * dp(22));
+                            current.animate().alpha(1f).translationX(0f)
+                                .setDuration(155)
+                                .setInterpolator(new android.view.animation.DecelerateInterpolator(1.5f))
+                                .start();
+                            current.animateToZoom(1.5f);
+                        }).start();
                 }
             });
         });
@@ -954,6 +1036,9 @@ public class MainActivity extends Activity {
         final FocusPageView page = focusPage;
         focusOverlay = null;
         focusPage = null;
+        focusPageTitle = null;
+        focusedPosition = -1;
+        focusedBitmapReady = false;
         focusZoomButton = null;
         focusToolbar = null;
         focusLoading = null;
