@@ -11,7 +11,7 @@ import android.view.View;
 /** Compact stroke icons with a 48dp accessible touch target. No external assets. */
 public final class ReaderIcon extends View {
     public static final String BACK = "back", OPEN = "open", ZOOM = "zoom",
-        SHARE = "share", MORE = "more", PAGES = "pages", MOVE = "move",
+        SHARE = "share", MORE = "more", PAGES = "pages", MOVE = "move", EDIT = "edit",
         EXTRACT = "extract", DELETE = "delete", SAVE = "save", RESET = "reset",
         CLOSE = "close", PREVIOUS = "previous", NEXT = "next";
 
@@ -81,6 +81,16 @@ public final class ReaderIcon extends View {
                 line(raw, 9, 8, 16, 8); line(raw, 9, 12, 16, 12);
                 line(raw, 9, 16, 14, 16);
                 line(raw, 2, 7, 2, 21); line(raw, 2, 21, 16, 21);
+                break;
+            case EDIT:
+                // A plain outline pencil instead of an extra filled button.
+                line(raw, 5, 19, 16, 8);
+                line(raw, 16, 8, 20, 12);
+                line(raw, 20, 12, 9, 23);
+                line(raw, 5, 19, 9, 23);
+                line(raw, 16, 8, 18.5f, 5.5f);
+                line(raw, 18.5f, 5.5f, 22, 9);
+                line(raw, 22, 9, 20, 12);
                 break;
             case MOVE:
                 line(raw, 12, 3, 12, 21);
