@@ -53,6 +53,7 @@ public final class PdfPageList extends RecyclerView {
     private List<Integer> pageOrder = new ArrayList<>();
     private PdfRenderer pdf;
     private volatile int generation = 0;
+    private boolean restoringDocument;
     public PdfPageList(Context context, PageListener listener) {
         super(context);
         this.listener = listener;
@@ -82,7 +83,7 @@ public final class PdfPageList extends RecyclerView {
     }
 
     private void notifyVisiblePage() {
-        if (adapter.getItemCount() == 0) return;
+        if (restoringDocument || adapter.getItemCount() == 0) return;
         int first = layout.findFirstVisibleItemPosition();
         if (first == NO_POSITION) return;
         // Report the page nearest the top, or the next one if the top page has
@@ -94,6 +95,7 @@ public final class PdfPageList extends RecyclerView {
     }
 
     private void notifyScrollProgress() {
+        if (restoringDocument) return;
         int first = layout.findFirstVisibleItemPosition();
         if (first == NO_POSITION || adapter.getItemCount() == 0) return;
         View row = layout.findViewByPosition(first);
@@ -104,19 +106,39 @@ public final class PdfPageList extends RecyclerView {
             first + fractional));
     }
 
-    public void setDocument(PdfRenderer reader, List<Integer> order) {
+    /** Restore each document directly to its saved page. Never publish page 0
+     * during binding: that old notification overwrote MainActivity's pageIndex,
+     * making every PDF reopen at its first page. */
+    public void setDocument(PdfRenderer reader, List<Integer> order, int initialPage) {
+        stopScroll();
+        restoringDocument = true;
+        final int request;
         synchronized (renderLock) {
-            generation++;
+            request = ++generation;
             pdf = reader;
         }
         pageOrder = order;
         inFlight.clear();
         bitmaps.evictAll();
         adapter.notifyDataSetChanged();
-        scrollToPage(0);
+        if (!pageOrder.isEmpty()) {
+            int target = Math.max(0, Math.min(pageOrder.size() - 1, initialPage));
+            layout.scrollToPositionWithOffset(target, dp(6));
+            listener.onScrollProgress(target);
+            postOnAnimation(() -> {
+                if (generation != request || pdf == null) return;
+                restoringDocument = false;
+                // After layout, use the actual first visible page.
+                notifyVisiblePage();
+                notifyScrollProgress();
+            });
+        } else {
+            restoringDocument = false;
+        }
     }
 
     public void clearDocument() {
+        restoringDocument = false;
         synchronized (renderLock) {
             generation++;
             pdf = null;

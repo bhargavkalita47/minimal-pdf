@@ -1036,13 +1036,14 @@ public class MainActivity extends Activity {
                             }
                             pendingFocusSwap = null;
                             if (focusLoading != null) focusLoading.setVisibility(View.GONE);
-                            current.setBitmap(result);
+                            // Keep the exact user-selected zoom (100%-500%)
+                            // across page swipes rather than forcing 150% again.
+                            current.setBitmap(result, true);
                             current.setTranslationX(direction * dp(22));
                             current.animate().alpha(1f).translationX(0f)
                                 .setDuration(155)
                                 .setInterpolator(new android.view.animation.DecelerateInterpolator(1.5f))
                                 .start();
-                            current.animateToZoom(1.5f);
                         }).start();
                 }
             });
@@ -1234,8 +1235,9 @@ public class MainActivity extends Activity {
         }
         pageIndex = pageOrder.isEmpty() ? 0 :
             Math.max(0, Math.min(pageOrder.size() - 1, chosen.page));
-        pdfPages.setDocument(renderer, pageOrder);
-        if (!pageOrder.isEmpty()) pdfPages.scrollToPage(pageIndex);
+        // Bind and restore atomically; the old setDocument() forced a page-1
+        // callback before this value could be applied.
+        pdfPages.setDocument(renderer, pageOrder, pageIndex);
         if (emptyView != null) emptyView.setVisibility(View.GONE);
         if (!chromeVisible) {
             chromeVisible = true;
