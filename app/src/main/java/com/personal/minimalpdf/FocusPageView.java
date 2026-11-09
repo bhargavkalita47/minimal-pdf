@@ -10,6 +10,7 @@ import android.graphics.RectF;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
+import android.view.VelocityTracker;
 import android.view.View;
 import android.view.animation.DecelerateInterpolator;
 
@@ -33,6 +34,9 @@ public final class FocusPageView extends View {
     private float lastX, lastY;
     private boolean movedWithFingers = false;
     private ValueAnimator zoomAnimator;
+    private VelocityTracker swipeVelocity;
+    private float gestureStartX, gestureStartY;
+    private boolean multiTouchGesture;
 
     public FocusPageView(Context context, Actions actions) {
         super(context);
@@ -50,21 +54,7 @@ public final class FocusPageView extends View {
                 actions.onDoubleTap();
                 return true;
             }
-            @Override public boolean onFling(MotionEvent start, MotionEvent end,
-                                              float velocityX, float velocityY) {
-                if (start == null || end == null || movedWithFingers ||
-                    pinches.isInProgress()) return false;
-                float dx = end.getX() - start.getX();
-                float dy = end.getY() - start.getY();
-                float density = getResources().getDisplayMetrics().density;
-                if (Math.abs(dx) >= 65f * density &&
-                    Math.abs(dx) > Math.abs(dy) * 1.3f &&
-                    Math.abs(velocityX) >= 360f * density) {
-                    actions.onHorizontalSwipe(dx < 0 ? 1 : -1);
-                    return true;
-                }
-                return false;
-            }
+
         });
 
         pinches = new ScaleGestureDetector(context,
@@ -78,10 +68,22 @@ public final class FocusPageView extends View {
     }
 
     public void setBitmap(Bitmap image) {
+        setBitmap(image, false);
+    }
+
+    /** New pages keep the chosen focus zoom while centering their own content.
+     * This must also cancel any zoom animation still updating the old page. */
+    public void setBitmap(Bitmap image, boolean preserveZoom) {
+        float retainedZoom = preserveZoom ? zoom : 1f;
+        if (zoomAnimator != null) {
+            zoomAnimator.cancel();
+            zoomAnimator = null;
+        }
         if (bitmap != null && bitmap != image && !bitmap.isRecycled()) bitmap.recycle();
         bitmap = image;
-        zoom = 1f;
+        zoom = Math.max(1f, Math.min(5f, retainedZoom));
         panX = panY = 0;
+        clampPan();
         invalidate();
         actions.onZoomChanged(zoom);
     }
@@ -107,6 +109,7 @@ public final class FocusPageView extends View {
     }
 
     public void dispose() {
+        if (swipeVelocity != null) { swipeVelocity.recycle(); swipeVelocity = null; }
         if (zoomAnimator != null) zoomAnimator.cancel();
         if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
         bitmap = null;
@@ -170,13 +173,21 @@ public final class FocusPageView extends View {
         taps.onTouchEvent(e);
         int action = e.getActionMasked();
         if (action == MotionEvent.ACTION_DOWN) {
-            lastX = e.getX();
-            lastY = e.getY();
+            gestureStartX = lastX = e.getX();
+            gestureStartY = lastY = e.getY();
             movedWithFingers = false;
+            multiTouchGesture = false;
+            if (swipeVelocity != null) swipeVelocity.recycle();
+            swipeVelocity = VelocityTracker.obtain();
+            swipeVelocity.addMovement(e);
         } else if (action == MotionEvent.ACTION_POINTER_DOWN) {
             movedWithFingers = true;
+            multiTouchGesture = true;
         } else if (action == MotionEvent.ACTION_MOVE) {
-            if (e.getPointerCount() == 1 && !pinches.isInProgress() && !movedWithFingers && zoom > 1f) {
+            if (swipeVelocity != null && !multiTouchGesture)
+                swipeVelocity.addMovement(e);
+            if (e.getPointerCount() == 1 && !pinches.isInProgress()
+                && !movedWithFingers && zoom > 1f) {
                 panX += e.getX() - lastX;
                 panY += e.getY() - lastY;
                 clampPan();
@@ -185,10 +196,31 @@ public final class FocusPageView extends View {
             lastX = e.getX();
             lastY = e.getY();
         } else if (action == MotionEvent.ACTION_UP) {
+            if (swipeVelocity != null) {
+                swipeVelocity.addMovement(e);
+                swipeVelocity.computeCurrentVelocity(1000);
+            }
+            if (!multiTouchGesture && !pinches.isInProgress()) {
+                // Navigation is independent of zoom: fast one-finger horizontal
+                // swipes flip pages, while slow drags can still pan zoomed text.
+                float dx = e.getX() - gestureStartX;
+                float dy = e.getY() - gestureStartY;
+                float d = getResources().getDisplayMetrics().density;
+                float vx = swipeVelocity == null ? 0f : swipeVelocity.getXVelocity();
+                if (Math.abs(dx) >= 56f * d &&
+                    Math.abs(dx) > Math.abs(dy) * 1.35f &&
+                    (Math.abs(vx) >= 250f * d || Math.abs(dx) >= 112f * d)) {
+                    actions.onHorizontalSwipe(dx < 0 ? 1 : -1);
+                }
+            }
+            if (swipeVelocity != null) { swipeVelocity.recycle(); swipeVelocity = null; }
             performClick();
             movedWithFingers = false;
+            multiTouchGesture = false;
         } else if (action == MotionEvent.ACTION_CANCEL) {
+            if (swipeVelocity != null) { swipeVelocity.recycle(); swipeVelocity = null; }
             movedWithFingers = false;
+            multiTouchGesture = false;
         }
         return true;
     }
