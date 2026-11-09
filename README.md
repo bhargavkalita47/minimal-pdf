@@ -64,3 +64,9 @@ Requires Android 8.0 or newer.
 - Tap **Saved** to see a clean list of saved pages and jump directly to one.
 - Embedded chapter navigation is a separate option in the More menu and from the Saved dialog, avoiding a combined, crowded list.
 - Search stays offline and works for PDFs with a selectable text layer; scanned-image text requires OCR.
+
+### Version 1.13 — branded app icon
+
+- Custom red-and-white book/PDF launcher logo, packaged as a transparent drawable asset.
+- Android adaptive launcher icon uses a charcoal background and the book foreground, while a legacy layer-list icon provides a fallback.
+- The icon appears in the launcher, app drawer and Android application settings after installing v1.13.
