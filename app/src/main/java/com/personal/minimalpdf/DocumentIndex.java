@@ -164,6 +164,12 @@ public final class DocumentIndex {
         return output;
     }
 
+    private static String indent(int level) {
+        StringBuilder text = new StringBuilder();
+        for (int i = 0; i < Math.min(5, level); i++) text.append("  ");
+        return text.toString();
+    }
+
     private static void appendOutline(PDDocument document, PDOutlineItem item,
                                       List<Chapter> result, int depth) {
         int safety = 0;
@@ -174,8 +180,7 @@ public final class DocumentIndex {
                 if (index >= 0) {
                     String title = item.getTitle();
                     result.add(new Chapter(index,
-                        (depth == 0 ? "" : "    ".repeat(Math.min(5, depth))) +
-                            (title == null ? "Chapter" : title.trim())));
+                        indent(depth) + (title == null ? "Chapter" : title.trim())));
                 }
             } catch (IOException ignored) { }
             if (depth < 7 && item.getFirstChild() != null) {
