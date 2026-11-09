@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main, dev/immersive-reader-ui]
+    branches: [main, dev/page-scrub-multi-pdf]
   workflow_dispatch:
 
 jobs:
