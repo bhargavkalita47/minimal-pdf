@@ -504,8 +504,13 @@ public class MainActivity extends Activity {
         card.setBackground(colors.rounded(this, Color.rgb(26, 29, 33),
             Color.TRANSPARENT, 18));
         card.setClickable(true);
+        int availableWidth = Math.max(dp(190),
+            getResources().getDisplayMetrics().widthPixels - dp(30));
+        int availableHeight = Math.max(dp(150),
+            getResources().getDisplayMetrics().heightPixels - dp(210));
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-            dp(292), dp(376), Gravity.BOTTOM | Gravity.START);
+            Math.min(dp(292), availableWidth), Math.min(dp(376), availableHeight),
+            Gravity.BOTTOM | Gravity.START);
         params.leftMargin = dp(15);
         params.bottomMargin = dp(116);
         overlay.addView(card, params);
@@ -741,7 +746,9 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (focusOverlay != null) {
+        if (wheelOverlay != null) {
+            dismissWheel();
+        } else if (focusOverlay != null) {
             closeFocus();
         } else if (!chromeVisible) {
             chromeVisible = true;
@@ -1206,6 +1213,12 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        if (wheelOverlay != null) {
+            wheelOverlay.animate().cancel();
+            host.removeView(wheelOverlay);
+            wheelOverlay = null;
+            pickerWheel = null;
+        }
         closeDocument();
         if (pdfPages != null) pdfPages.dispose();
         background.shutdown();
