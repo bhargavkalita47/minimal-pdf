@@ -72,7 +72,9 @@ public final class DocumentIndex {
                     stripper.getText(doc);
                     results.pagesScanned++;
                     if (!stripper.matches.isEmpty()) {
-                        results.matches.addAll(stripper.matches);
+                        int available = Math.max(0, 200 - results.matches.size());
+                        results.matches.addAll(stripper.matches.subList(0,
+                            Math.min(available, stripper.matches.size())));
                         results.highlights.put(i, new ArrayList<>(stripper.rectangles));
                     }
                 }
@@ -115,14 +117,26 @@ public final class DocumentIndex {
                     characters.add(position);
                 }
             }
-            String source = glyphText.toString().toLowerCase(Locale.ROOT);
+            // Use PDFBox's extracted string for matching; unlike the glyph list,
+            // it contains synthesized word spaces, so multi-word searches work.
+            String source = (text == null ? glyphText.toString() : text)
+                .toLowerCase(Locale.ROOT);
             int start = 0;
             while ((start = source.indexOf(query, start)) >= 0) {
-                int end = Math.min(start + query.length(), characters.size());
-                if (end <= start) break;
+                if (characters.isEmpty()) break;
+                // Map extracted character ranges to glyph bounds. PDFBox may
+                // insert spaces absent from the underlying text positions.
+                int glyphStart = Math.min(characters.size() - 1,
+                    Math.round((float)start / Math.max(1, source.length()) *
+                        characters.size()));
+                int glyphEnd = Math.min(characters.size(),
+                    Math.max(glyphStart + 1, Math.round(
+                        (float)(start + query.length()) /
+                            Math.max(1, source.length()) * characters.size())));
+                if (glyphEnd <= glyphStart) break;
                 float left = Float.MAX_VALUE, top = Float.MAX_VALUE;
                 float right = -1, bottom = -1;
-                for (int i = start; i < end; i++) {
+                for (int i = glyphStart; i < glyphEnd; i++) {
                     TextPosition position = characters.get(i);
                     float x = position.getXDirAdj();
                     float y = position.getYDirAdj();
@@ -141,7 +155,7 @@ public final class DocumentIndex {
                 if (compact.length() > 105) compact = compact.substring(0, 105) + "…";
                 matches.add(new Match(originalPage, compact));
                 if (matches.size() >= 25) break;
-                start = end;
+                start += query.length();
             }
         }
         private static float clamp(float n) {
