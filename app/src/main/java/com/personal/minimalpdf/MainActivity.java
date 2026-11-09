@@ -744,6 +744,7 @@ public class MainActivity extends Activity {
             Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         params.bottomMargin = dp(116);
         overlay.addView(card, params);
+        card.setTranslationY(dp(12));
 
         TextView heading = text(pages ? "PAGES" : "OPEN DOCUMENTS", 11,
             Color.rgb(170, 177, 187), true);
@@ -780,8 +781,14 @@ public class MainActivity extends Activity {
                 chooseDocument();
             });
             card.addView(add, new LinearLayout.LayoutParams(-1, dp(43)));
+        } else {
+            // Same vertical wheel center for documents and pages.
+            card.addView(new View(this), new LinearLayout.LayoutParams(-1, dp(43)));
         }
         overlay.animate().alpha(1f).setDuration(150).start();
+        card.animate().translationY(0f).setDuration(165)
+            .setInterpolator(new android.view.animation.DecelerateInterpolator(1.5f))
+            .start();
     }
 
     private void applyChrome() {
