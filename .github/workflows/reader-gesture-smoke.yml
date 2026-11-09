@@ -1,0 +1,33 @@
+name: Reader pinch gesture smoke test
+
+on:
+  push:
+    branches: [dev/edit-sheet-drag-select-zoomfix]
+  workflow_dispatch:
+
+jobs:
+  gesture-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Enable hardware acceleration
+        run: |
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
+      - name: Verify normal-reader pinch zoom in Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-boot-timeout: 600
+          script: gradle --no-daemon connectedDebugAndroidTest
