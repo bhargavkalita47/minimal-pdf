@@ -329,7 +329,7 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams scrubParams = new FrameLayout.LayoutParams(
             dp(49), -1, Gravity.END);
         scrubParams.topMargin = dp(67);
-        scrubParams.bottomMargin = dp(121);
+        scrubParams.bottomMargin = dp(111);
         host.addView(pageScrubber, scrubParams);
 
         // Fixed overlays: hiding controls never resizes the document viewport.
@@ -363,14 +363,11 @@ public class MainActivity extends Activity {
         meta.addView(fileLabel, new LinearLayout.LayoutParams(-1, dp(23)));
         pageLabel = text("Open a document", 11, barMuted, false);
         pageLabel.setSingleLine(true);
-        pageLabel.setOnClickListener(view -> showPages());
+        pageLabel.setOnClickListener(view -> showLibraryManager());
         meta.addView(pageLabel, new LinearLayout.LayoutParams(-1, dp(19)));
 
         openButton = iconButton(ReaderIcon.OPEN, "Open PDF", view -> chooseDocument());
         header.addView(openButton, new LinearLayout.LayoutParams(dp(43), dp(48)));
-        shareButton = iconButton(ReaderIcon.SHARE, "Share PDF",
-            view -> sharePages(new ArrayList<>(pageOrder)));
-        header.addView(shareButton, new LinearLayout.LayoutParams(dp(43), dp(48)));
         ReaderIcon more = iconButton(ReaderIcon.MORE, "More actions", this::showReaderMenu);
         header.addView(more, new LinearLayout.LayoutParams(dp(43), dp(48)));
 
@@ -378,7 +375,7 @@ public class MainActivity extends Activity {
         footer.setOrientation(LinearLayout.VERTICAL);
         footer.setBackgroundColor(barBackground);
         footerView = footer;
-        host.addView(footer, new FrameLayout.LayoutParams(-1, dp(112), Gravity.BOTTOM));
+        host.addView(footer, new FrameLayout.LayoutParams(-1, dp(103), Gravity.BOTTOM));
 
         LinearLayout paging = new LinearLayout(this);
         paging.setGravity(Gravity.CENTER_VERTICAL);
@@ -415,12 +412,13 @@ public class MainActivity extends Activity {
         LinearLayout actions = new LinearLayout(this);
         actions.setGravity(Gravity.CENTER);
         actions.setPadding(dp(4), dp(1), dp(4), dp(3));
-        footer.addView(actions, new LinearLayout.LayoutParams(-1, dp(67)));
-        addAction(actions, ReaderIcon.PAGES, "Pages", view -> showWheel(true));
-        addAction(actions, ReaderIcon.OPEN, "PDFs", view -> showWheel(false));
-        addAction(actions, ReaderIcon.SHARE, "Share", view ->
-            sharePages(new ArrayList<>(pageOrder)));
+        footer.addView(actions, new LinearLayout.LayoutParams(-1, dp(59)));
+        addAction(actions, ReaderIcon.SEARCH, "Search", view -> searchPdf());
+        addAction(actions, ReaderIcon.BOOKMARK, "Bookmarks",
+            view -> showBookmarksAndChapters());
         saveButton = addAction(actions, ReaderIcon.MOVE, "Edit", view -> showEditMenu());
+        shareButton = addAction(actions, ReaderIcon.SHARE, "Share", view ->
+            sharePages(new ArrayList<>(pageOrder)));
 
         refreshUI();
     }
@@ -434,15 +432,15 @@ public class MainActivity extends Activity {
         cell.setOnClickListener(view -> {
             if (ready()) callback.onClick(view);
         });
-        actions.addView(cell, new LinearLayout.LayoutParams(0, dp(65), 1));
+        actions.addView(cell, new LinearLayout.LayoutParams(0, dp(57), 1));
 
         ReaderIcon icon = iconButton(symbol, label, view -> {
             if (ready()) callback.onClick(view);
         });
-        cell.addView(icon, new LinearLayout.LayoutParams(dp(40), dp(38)));
+        cell.addView(icon, new LinearLayout.LayoutParams(dp(43), dp(37)));
         TextView caption = text(label, 10, barMuted, false);
         caption.setGravity(Gravity.CENTER);
-        cell.addView(caption, new LinearLayout.LayoutParams(-1, dp(18)));
+        cell.addView(caption, new LinearLayout.LayoutParams(-1, dp(17)));
         documentButtons.add(icon);
         return icon;
     }
@@ -538,7 +536,7 @@ public class MainActivity extends Activity {
         int height = Math.min(dp(284), getResources().getDisplayMetrics().heightPixels - dp(185));
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
             width, Math.max(dp(150), height), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        params.bottomMargin = dp(113);
+        params.bottomMargin = dp(107);
         overlay.addView(wheel, params);
         overlay.animate().alpha(1f).setDuration(105).start();
     }
@@ -596,6 +594,7 @@ public class MainActivity extends Activity {
         private boolean dragging;
         private int initial;
         private int lastSelection;
+        private long lastVibration;
 
         DirectWheelGesture(boolean pages) { this.pages = pages; }
 
@@ -615,6 +614,12 @@ public class MainActivity extends Activity {
         private void updateSelection(int selection) {
             if (selection == lastSelection) return;
             lastSelection = selection;
+            long now = android.os.SystemClock.uptimeMillis();
+            if (hapticsEnabled && now - lastVibration >= 85L) {
+                (pages ? pageSelector : documentSelector).performHapticFeedback(
+                    android.view.HapticFeedbackConstants.CLOCK_TICK);
+                lastVibration = now;
+            }
             if (pages) {
                 jumpPageLive(selection);
             } else {
@@ -881,7 +886,7 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
             Math.min(dp(292), availableWidth), Math.min(dp(376), availableHeight),
             Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        params.bottomMargin = dp(116);
+        params.bottomMargin = dp(108);
         overlay.addView(card, params);
         card.setTranslationY(dp(12));
 
