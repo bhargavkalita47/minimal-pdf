@@ -1265,7 +1265,9 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (dragPreviewOverlay != null) {
+        if (searchOverlay != null) {
+            dismissSearch();
+        } else if (dragPreviewOverlay != null) {
             dismissDragPreview(true);
         } else if (editOverlay != null) {
             dismissEditMenu();
@@ -1603,107 +1605,243 @@ public class MainActivity extends Activity {
             .show();
     }
 
+    /** A small search bar over the document, not a blocking results dialog. */
     private void searchPdf() {
         if (!ready()) return;
-        if (searchDialog != null && searchDialog.isShowing()) return;
-        LinearLayout container = new LinearLayout(this);
-        container.setOrientation(LinearLayout.VERTICAL);
-        container.setPadding(dp(18), dp(12), dp(18), dp(10));
+        if (focusOverlay != null) closeFocus();
+        if (searchOverlay != null) {
+            if (searchInput != null) searchInput.requestFocus();
+            return;
+        }
+        if (!chromeVisible) {
+            chromeVisible = true;
+            applyChrome();
+        }
+
+        FrameLayout overlay = new FrameLayout(this);
+        searchOverlay = overlay;
+        overlay.setAlpha(0f);
+        FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(
+            -1, dp(85), Gravity.TOP);
+        overlayParams.topMargin = dp(61);
+        host.addView(overlay, overlayParams);
+
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(9), dp(5), dp(8), dp(4));
+        panel.setElevation(dp(7));
+        panel.setBackground(colors.rounded(this, barBackground,
+            Color.TRANSPARENT, 14));
+        FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(
+            -1, -1);
+        panelParams.leftMargin = dp(10);
+        panelParams.rightMargin = dp(10);
+        overlay.addView(panel, panelParams);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        panel.addView(row, new LinearLayout.LayoutParams(-1, dp(53)));
+
         EditText input = new EditText(this);
+        searchInput = input;
         input.setSingleLine(true);
-        input.setTextSize(16);
-        input.setHint("Find words in this PDF");
-        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
-        container.addView(input, new LinearLayout.LayoutParams(-1, dp(50)));
+        input.setTextSize(15);
+        input.setTextColor(barForeground);
+        input.setHintTextColor(barMuted);
+        input.setHint("Find in PDF");
+        input.setInputType(InputType.TYPE_CLASS_TEXT);
+        input.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
+        input.setPadding(dp(9), 0, dp(5), 0);
+        input.setBackgroundColor(Color.TRANSPARENT);
+        row.addView(input, new LinearLayout.LayoutParams(0, dp(47), 1));
 
-        TextView status = text("Enter at least two characters", 12,
-            colors.mutedText, false);
-        status.setPadding(dp(2), dp(7), 0, dp(8));
-        container.addView(status, new LinearLayout.LayoutParams(-1, dp(35)));
-        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
-        LinearLayout matches = new LinearLayout(this);
-        matches.setOrientation(LinearLayout.VERTICAL);
-        scroll.addView(matches, new android.widget.ScrollView.LayoutParams(-1, -2));
-        container.addView(scroll, new LinearLayout.LayoutParams(-1, dp(340)));
+        Button previous = button("↑", view -> moveSearchMatch(-1));
+        searchPrevious = previous;
+        compactSearchButton(previous, "Previous result");
+        row.addView(previous, new LinearLayout.LayoutParams(dp(44), dp(48)));
 
-        searchDialog = new AlertDialog.Builder(this)
-            .setTitle("Search PDF")
-            .setView(container)
-            .setPositiveButton("Close", (dialog, button) -> { })
-            .create();
-        final Uri source = sourceUri;
-        searchDialog.setOnDismissListener(dialog -> {
-            searchGeneration++;
-            if (searchDebounce != null) uiHandler.removeCallbacks(searchDebounce);
-            searchDialog = null;
-        });
+        Button next = button("↓", view -> moveSearchMatch(1));
+        searchNext = next;
+        compactSearchButton(next, "Next result");
+        row.addView(next, new LinearLayout.LayoutParams(dp(44), dp(48)));
+
+        Button close = button("×", view -> dismissSearch());
+        compactSearchButton(close, "Close search");
+        close.setTextSize(22);
+        row.addView(close, new LinearLayout.LayoutParams(dp(44), dp(48)));
+
+        searchStatus = text("Type at least 2 letters", 11, barMuted, false);
+        searchStatus.setPadding(dp(9), 0, 0, 0);
+        panel.addView(searchStatus, new LinearLayout.LayoutParams(-1, dp(20)));
+        updateSearchControls();
+
+        final Uri document = sourceUri;
         input.addTextChangedListener(new android.text.TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence text, int start,
-                                                      int count, int after) { }
-            @Override public void onTextChanged(CharSequence text, int start,
-                                                 int before, int count) {
-                if (searchDebounce != null) uiHandler.removeCallbacks(searchDebounce);
-                final String query = text.toString().trim();
+            @Override public void beforeTextChanged(CharSequence value, int start,
+                                                     int count, int after) { }
+            @Override public void onTextChanged(CharSequence value, int start,
+                                                int before, int count) {
+                final String query = value.toString().trim();
                 final int generation = ++searchGeneration;
-                matches.removeAllViews();
+                if (searchDebounce != null) uiHandler.removeCallbacks(searchDebounce);
+                activeSearch = null;
+                searchMatchIndex = -1;
+                pdfPages.setSearchHighlights(null);
+                updateSearchControls();
                 if (query.length() < 2) {
-                    status.setText("Enter at least two characters");
-                    pdfPages.setSearchHighlights(null);
+                    if (searchStatus != null)
+                        searchStatus.setText("Type at least 2 letters");
                     return;
                 }
-                status.setText("Searching selectable PDF text…");
+                if (searchStatus != null) searchStatus.setText("Searching…");
                 searchDebounce = () -> indexWorker.execute(() -> {
                     if (generation != searchGeneration) return;
                     DocumentIndex.SearchResult result = null;
-                    String error = null;
+                    String failure = null;
                     try {
                         result = DocumentIndex.search(getContentResolver(),
-                            source, query, () -> generation != searchGeneration);
-                    } catch (Exception ex) {
-                        error = errorMessage(ex);
+                            document, query, () -> generation != searchGeneration);
+                    } catch (Exception error) {
+                        failure = errorMessage(error);
                     }
-                    final DocumentIndex.SearchResult readyResult = result;
-                    final String failure = error;
+                    final DocumentIndex.SearchResult completed = result;
+                    final String message = failure;
                     runOnUiThread(() -> {
-                        if (generation != searchGeneration || searchDialog == null ||
-                            !source.equals(sourceUri)) return;
-                        matches.removeAllViews();
-                        if (readyResult == null) {
-                            status.setText("Search failed: " + failure);
+                        if (generation != searchGeneration || searchOverlay == null
+                            || !document.equals(sourceUri)) return;
+                        if (completed == null) {
+                            if (searchStatus != null)
+                                searchStatus.setText("Couldn't search: " + message);
                             return;
                         }
-                        activeSearch = readyResult;
-                        pdfPages.setSearchHighlights(readyResult.highlights);
-                        status.setText(readyResult.matches.size() + " match(es)" +
-                            (readyResult.truncated ? " · first 200 shown" : "") +
-                            " · " + readyResult.pagesScanned + " pages scanned");
-                        int limit = Math.min(readyResult.matches.size(), 70);
-                        for (int j = 0; j < limit; j++) {
-                            DocumentIndex.Match match = readyResult.matches.get(j);
-                            int displayed = pageOrder.indexOf(match.originalPage);
-                            if (displayed < 0) continue;
-                            TextView row = text("Page " + (displayed + 1) +
-                                "    " + match.snippet, 13, colors.foreground, false);
-                            row.setPadding(dp(9), dp(11), dp(9), dp(11));
-                            row.setOnClickListener(view -> {
-                                goToOriginalPage(match.originalPage);
-                                if (searchDialog != null) searchDialog.dismiss();
-                            });
-                            matches.addView(row, new LinearLayout.LayoutParams(-1, -2));
+                        // Navigate in the reader's current page order, even if pages
+                        // have been rearranged since the PDF was opened.
+                        completed.matches.sort((a, b) -> Integer.compare(
+                            pageOrder.indexOf(a.originalPage),
+                            pageOrder.indexOf(b.originalPage)));
+                        activeSearch = completed;
+                        pdfPages.setSearchHighlights(completed.highlights);
+                        if (completed.matches.isEmpty()) {
+                            if (searchStatus != null)
+                                searchStatus.setText("No matches in selectable text");
+                            updateSearchControls();
+                            return;
                         }
-                        if (readyResult.matches.isEmpty()) {
-                            TextView none = text("No matches in the text layer. Scanned PDFs require OCR.",
-                                13, colors.mutedText, false);
-                            none.setPadding(dp(8), dp(12), dp(8), dp(12));
-                            matches.addView(none);
+                        int first = 0;
+                        for (int j = 0; j < completed.matches.size(); j++) {
+                            if (pageOrder.indexOf(completed.matches.get(j).originalPage)
+                                >= pageIndex) {
+                                first = j;
+                                break;
+                            }
                         }
+                        searchMatchIndex = first;
+                        updateSearchControls();
+                        // Show the first relevant match as soon as search completes.
+                        showSearchMatch(false);
                     });
                 });
-                uiHandler.postDelayed(searchDebounce, 330);
+                uiHandler.postDelayed(searchDebounce, 380);
             }
-            @Override public void afterTextChanged(android.text.Editable edit) { }
+            @Override public void afterTextChanged(android.text.Editable editable) { }
         });
-        searchDialog.show();
+        input.setOnEditorActionListener((view, actionId, event) -> {
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH) {
+                hideSearchKeyboard();
+                if (activeSearch != null && !activeSearch.matches.isEmpty())
+                    showSearchMatch(false);
+                return true;
+            }
+            return false;
+        });
+
+        overlay.animate().alpha(1f).setDuration(140).start();
+        input.requestFocus();
+        input.postDelayed(() -> {
+            if (searchOverlay == overlay && searchInput == input) {
+                android.view.inputmethod.InputMethodManager keyboard =
+                    (android.view.inputmethod.InputMethodManager)
+                        getSystemService(INPUT_METHOD_SERVICE);
+                if (keyboard != null)
+                    keyboard.showSoftInput(input,
+                        android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+            }
+        }, 170);
+    }
+
+    private void compactSearchButton(Button button, String description) {
+        button.setTextSize(20);
+        button.setTextColor(barForeground);
+        button.setContentDescription(description);
+        button.setPadding(0, 0, 0, 0);
+        button.setBackgroundColor(Color.TRANSPARENT);
+    }
+
+    private void updateSearchControls() {
+        int total = activeSearch == null ? 0 : activeSearch.matches.size();
+        boolean available = total > 0;
+        if (searchPrevious != null) {
+            searchPrevious.setEnabled(available);
+            searchPrevious.setAlpha(available ? 1f : .35f);
+        }
+        if (searchNext != null) {
+            searchNext.setEnabled(available);
+            searchNext.setAlpha(available ? 1f : .35f);
+        }
+        if (available && searchStatus != null) {
+            searchStatus.setText((searchMatchIndex + 1) + " of " + total +
+                (activeSearch.truncated ? "  ·  First 200 matches" : ""));
+        }
+    }
+
+    private void moveSearchMatch(int direction) {
+        if (activeSearch == null || activeSearch.matches.isEmpty()) return;
+        int size = activeSearch.matches.size();
+        searchMatchIndex = (searchMatchIndex + direction + size) % size;
+        showSearchMatch(true);
+    }
+
+    private void showSearchMatch(boolean hideKeyboard) {
+        if (activeSearch == null || activeSearch.matches.isEmpty()
+            || searchMatchIndex < 0 || !ready()) return;
+        if (hideKeyboard) hideSearchKeyboard();
+        updateSearchControls();
+        goToOriginalPage(activeSearch.matches.get(searchMatchIndex).originalPage);
+    }
+
+    private void hideSearchKeyboard() {
+        if (searchInput == null) return;
+        android.view.inputmethod.InputMethodManager keyboard =
+            (android.view.inputmethod.InputMethodManager)
+                getSystemService(INPUT_METHOD_SERVICE);
+        if (keyboard != null)
+            keyboard.hideSoftInputFromWindow(searchInput.getWindowToken(), 0);
+        searchInput.clearFocus();
+    }
+
+    private void dismissSearch() {
+        ++searchGeneration;
+        if (searchDebounce != null) {
+            uiHandler.removeCallbacks(searchDebounce);
+            searchDebounce = null;
+        }
+        hideSearchKeyboard();
+        FrameLayout old = searchOverlay;
+        searchOverlay = null;
+        searchInput = null;
+        searchStatus = null;
+        searchPrevious = null;
+        searchNext = null;
+        activeSearch = null;
+        searchMatchIndex = -1;
+        if (pdfPages != null) pdfPages.setSearchHighlights(null);
+        if (old != null) {
+            old.animate().cancel();
+            old.animate().alpha(0f).setDuration(120)
+                .withEndAction(() -> {
+                    if (host != null && old.getParent() == host) host.removeView(old);
+                }).start();
+        }
     }
 
     private void restoreRecentOnly() {
@@ -1738,9 +1876,7 @@ public class MainActivity extends Activity {
                                      PdfRenderer opened) {
         DocumentSession chosen = documents.get(position);
         saveActiveSession();
-        searchGeneration++; // Cancel any search against the old document.
-        if (searchDialog != null) searchDialog.dismiss();
-        activeSearch = null;
+        dismissSearch(); // Close search before opening a different PDF.
         closeDocument();
         sourceFd = descriptor;
         renderer = opened;
@@ -1857,6 +1993,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeAllDocuments() {
+        dismissSearch();
         cancelRequestedDocumentSwitch();
         dismissDragPreview(false);
         dismissWheel();
@@ -2184,8 +2321,7 @@ public class MainActivity extends Activity {
         cancelRequestedDocumentSwitch();
         dismissDragPreview(false);
         documentWorker.shutdownNow();
-        searchGeneration++;
-        if (searchDialog != null) searchDialog.dismiss();
+        dismissSearch();
         indexWorker.shutdownNow();
         chapterWorker.shutdownNow();
         if (editOverlay != null) {
