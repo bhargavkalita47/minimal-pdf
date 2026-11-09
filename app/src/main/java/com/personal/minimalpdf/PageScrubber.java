@@ -1,6 +1,5 @@
 package com.personal.minimalpdf;
 
-import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -8,7 +7,6 @@ import android.graphics.Paint;
 import android.graphics.RectF;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.animation.DecelerateInterpolator;
 
 /**
  * Minimal position-aware page thumb. Remains touchable when faded, so a user
@@ -30,7 +28,30 @@ public final class PageScrubber extends View {
     private int pending = -1;
     private boolean scheduled;
     private Runnable fadeCallback;
-    private ValueAnimator slide;
+    private float targetPosition;
+    private boolean motionScheduled;
+    private long previousFrameNs;
+    private final Runnable moveFrame = new Runnable() {
+        @Override public void run() {
+            motionScheduled = false;
+            if (dragging || count <= 0) return;
+            long now = System.nanoTime();
+            long elapsed = previousFrameNs == 0L ? 16_666_667L : now - previousFrameNs;
+            previousFrameNs = now;
+            // Time-based damping gives the same feel at 60, 90 and 120 Hz,
+            // and follows repeated targets instead of restarting animations.
+            float ms = Math.max(1f, Math.min(40f, elapsed / 1_000_000f));
+            float gain = 1f - (float)Math.exp(-ms / 85f);
+            displayed += (targetPosition - displayed) * gain;
+            if (Math.abs(targetPosition - displayed) < 0.003f) {
+                displayed = targetPosition;
+            } else {
+                motionScheduled = true;
+                postOnAnimation(this);
+            }
+            invalidate();
+        }
+    };
 
     public PageScrubber(Context context, Listener listener) {
         super(context);
@@ -80,41 +101,54 @@ public final class PageScrubber extends View {
         }
     }
 
+    private void follow(float position) {
+        float next = Math.max(0f, Math.min(Math.max(0, count - 1), position));
+        if (dragging || count == 0) return;
+        targetPosition = next;
+        if (!motionScheduled && Math.abs(targetPosition - displayed) >= 0.003f) {
+            motionScheduled = true;
+            previousFrameNs = 0L;
+            postOnAnimation(moveFrame);
+        }
+    }
+
+    /** Page label and document-size changes. Avoid restarting in-flight motion. */
     public void setPage(int page, int total) {
         int newCount = Math.max(0, total);
-        int target = newCount == 0 ? 0 : Math.max(0, Math.min(newCount - 1, page));
-        boolean newDocument = newCount != count;
-        boolean changed = target != selected;
+        int nextPage = newCount == 0 ? 0 : Math.max(0, Math.min(newCount - 1, page));
+        boolean changedCount = newCount != count;
+        boolean changedPage = nextPage != selected;
         count = newCount;
-        selected = target;
+        selected = nextPage;
         setVisibility(count > 0 ? VISIBLE : GONE);
-
         if (count == 0) {
-            if (slide != null) slide.cancel();
+            removeCallbacks(moveFrame);
+            motionScheduled = false;
             cancelFade();
             setAlpha(0f);
             return;
         }
-
-        if (newDocument || dragging) {
-            if (slide != null) slide.cancel();
-            displayed = selected;
-        } else if (changed) {
-            if (slide != null) slide.cancel();
-            slide = ValueAnimator.ofFloat(displayed, selected);
-            slide.setDuration(220);
-            slide.setInterpolator(new DecelerateInterpolator(1.6f));
-            slide.addUpdateListener(a -> {
-                displayed = (float)a.getAnimatedValue();
-                invalidate();
-            });
-            slide.start();
+        if (changedCount) {
+            removeCallbacks(moveFrame);
+            motionScheduled = false;
+            previousFrameNs = 0L;
+            displayed = targetPosition = nextPage;
+        } else if (dragging) {
+            removeCallbacks(moveFrame);
+            motionScheduled = false;
+            displayed = targetPosition = nextPage;
+        } else if (changedPage) {
+            follow(nextPage);
         }
-
-        if (changed || newDocument) showBriefly();
+        if (changedPage || changedCount) showBriefly();
         setContentDescription("Page " + (selected + 1) + " of " + count
             + ". Drag vertically to change page");
         invalidate();
+    }
+
+    /** Follow fractional scroll progress, not just discrete page numbers. */
+    public void setScrollPosition(float position) {
+        follow(position);
     }
 
     @Override protected void onDraw(Canvas canvas) {
@@ -164,12 +198,13 @@ public final class PageScrubber extends View {
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 dragging = true;
-                if (slide != null) slide.cancel();
+                removeCallbacks(moveFrame);
+                motionScheduled = false;
                 lastDelivered = -1;
                 if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
                 appear();
                 selected = indexAt(event.getY());
-                displayed = selected;
+                displayed = targetPosition = selected;
                 invalidate();
                 scheduleSelection(selected);
                 return true;
@@ -178,7 +213,7 @@ public final class PageScrubber extends View {
                 int next = indexAt(event.getY());
                 if (next != selected) {
                     selected = next;
-                    displayed = next;
+                    displayed = targetPosition = next;
                     scheduleSelection(next);
                     invalidate();
                 }
@@ -186,7 +221,7 @@ public final class PageScrubber extends View {
             case MotionEvent.ACTION_UP:
                 if (dragging) {
                     selected = indexAt(event.getY());
-                    displayed = selected;
+                    displayed = targetPosition = selected;
                     dragging = false;
                     pending = -1;
                     if (lastDelivered != selected) listener.onScrub(selected);
@@ -210,7 +245,8 @@ public final class PageScrubber extends View {
     }
 
     @Override protected void onDetachedFromWindow() {
-        if (slide != null) slide.cancel();
+        removeCallbacks(moveFrame);
+        motionScheduled = false;
         cancelFade();
         super.onDetachedFromWindow();
     }
