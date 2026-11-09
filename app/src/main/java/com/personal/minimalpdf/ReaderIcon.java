@@ -38,6 +38,11 @@ public final class ReaderIcon extends View {
             Color.TRANSPARENT, Color.TRANSPARENT, 12));
     }
 
+    @Override public void setSelected(boolean selected) {
+        super.setSelected(selected);
+        invalidate();
+    }
+
     public void setIconColor(int value) {
         color = value;
         invalidate();
@@ -71,9 +76,19 @@ public final class ReaderIcon extends View {
                 line(raw, 15.5f, 15.5f, 21, 21);
                 break;
             case BOOKMARK:
-                line(raw, 6, 3, 18, 3); line(raw, 18, 3, 18, 21);
-                line(raw, 18, 21, 12, 17); line(raw, 12, 17, 6, 21);
-                line(raw, 6, 21, 6, 3);
+                if (isSelected()) {
+                    Path selected = new Path();
+                    selected.moveTo(6, 3); selected.lineTo(18, 3);
+                    selected.lineTo(18, 21); selected.lineTo(12, 17);
+                    selected.lineTo(6, 21); selected.close();
+                    ink.setStyle(Paint.Style.FILL);
+                    raw.drawPath(selected, ink);
+                    ink.setStyle(Paint.Style.STROKE);
+                } else {
+                    line(raw, 6, 3, 18, 3); line(raw, 18, 3, 18, 21);
+                    line(raw, 18, 21, 12, 17); line(raw, 12, 17, 6, 21);
+                    line(raw, 6, 21, 6, 3);
+                }
                 break;
             case ZOOM:
                 circle(raw, 10.5f, 10.5f, 6.5f);

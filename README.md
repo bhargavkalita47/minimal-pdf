@@ -56,3 +56,11 @@ Requires Android 8.0 or newer.
 - Document manager for reordering and closing open PDFs while preserving their respective reading positions; active document and last-read pages are visible
 - Optional, throttled haptic feedback for selection changes
 - Fixed overlays and near-zero reading padding so hiding the toolbars reveals the complete reading area without content resizing
+
+### Version 1.12 — simpler search and saved pages
+
+- Tap **Find** to open a small search field over the document; PDF pages remain readable and scrollable. Results appear as highlights, with up/down buttons and a compact result counter. Close with × or Back.
+- Tap **Save** once to bookmark/unbookmark the current page. The icon fills when saved.
+- Tap **Saved** to see a clean list of saved pages and jump directly to one.
+- Embedded chapter navigation is a separate option in the More menu and from the Saved dialog, avoiding a combined, crowded list.
+- Search stays offline and works for PDFs with a selectable text layer; scanned-image text requires OCR.
