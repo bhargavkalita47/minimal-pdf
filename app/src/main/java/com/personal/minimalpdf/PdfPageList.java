@@ -56,6 +56,8 @@ public final class PdfPageList extends RecyclerView {
     private PdfRenderer pdf;
     private volatile int generation = 0;
     private boolean restoringDocument;
+    private boolean adjustingReaderInsets;
+    private boolean readerChromeVisible = false;
     private float readingProgress;
     private Map<Integer, List<RectF>> searchHighlights = new HashMap<>();
     public PdfPageList(Context context, PageListener listener) {
@@ -67,8 +69,9 @@ public final class PdfPageList extends RecyclerView {
         setOverScrollMode(OVER_SCROLL_IF_CONTENT_SCROLLS);
         setItemAnimator(null);
         setHasFixedSize(false);
-        setClipToPadding(false);
-        // Never reserve invisible toolbar height inside the reader. Toolbars are overlays.
+        // Keep pages inside the unobscured reading area. Without clipping, rows
+        // visibly scroll beneath the header and footer while the chrome is up.
+        setClipToPadding(true);
         setPadding(0, dp(2), 0, dp(2));
         setItemViewCacheSize(3);
         setBackgroundColor(Color.rgb(229, 231, 235));
@@ -88,19 +91,22 @@ public final class PdfPageList extends RecyclerView {
     }
 
     private void notifyVisiblePage() {
-        if (restoringDocument || adapter.getItemCount() == 0) return;
+        if (restoringDocument || adjustingReaderInsets || adapter.getItemCount() == 0)
+            return;
         int first = layout.findFirstVisibleItemPosition();
         if (first == NO_POSITION) return;
         // Report the page nearest the top, or the next one if the top page has
         // almost completely scrolled out of sight.
         View top = layout.findViewByPosition(first);
-        if (top != null && first + 1 < adapter.getItemCount() && top.getBottom() < getHeight() / 5)
+        if (top != null && first + 1 < adapter.getItemCount() &&
+            top.getBottom() < getPaddingTop() +
+                (getHeight() - getPaddingTop() - getPaddingBottom()) / 5)
             first++;
         listener.onVisiblePageChanged(first);
     }
 
     private void notifyScrollProgress() {
-        if (restoringDocument) return;
+        if (restoringDocument || adjustingReaderInsets) return;
         int first = layout.findFirstVisibleItemPosition();
         if (first == NO_POSITION || adapter.getItemCount() == 0) return;
         View row = layout.findViewByPosition(first);
@@ -109,6 +115,38 @@ public final class PdfPageList extends RecyclerView {
             (getPaddingTop() - row.getTop()) / (float)Math.max(1, row.getHeight())));
         readingProgress = Math.min(adapter.getItemCount() - 1f, first + fractional);
         listener.onScrollProgress(readingProgress);
+    }
+
+    /** Resize the *visible* reader viewport with the chrome. The scroll anchor
+     * is kept relative to the usable area, so toggling controls does not reset
+     * the active page or jump to another section of the PDF.
+     *
+     * In chrome mode pages are fully clipped below the header and above the
+     * footer. With chrome hidden, the padding collapses to 2dp on each edge. */
+    public void setReaderChromeVisible(boolean visible) {
+        int top = dp(visible ? 61 : 2);
+        int bottom = dp(visible ? 105 : 2);
+        if (readerChromeVisible == visible &&
+            getPaddingTop() == top && getPaddingBottom() == bottom) return;
+
+        stopScroll();
+        int first = layout.findFirstVisibleItemPosition();
+        View current = first == NO_POSITION ? null : layout.findViewByPosition(first);
+        int offset = current == null ? dp(2) : current.getTop() - getPaddingTop();
+        final int requestGeneration = generation;
+        readerChromeVisible = visible;
+        adjustingReaderInsets = true;
+        setPadding(0, top, 0, bottom);
+        if (first != NO_POSITION && adapter.getItemCount() > 0) {
+            layout.scrollToPositionWithOffset(first, offset);
+        }
+        postOnAnimation(() -> {
+            adjustingReaderInsets = false;
+            if (requestGeneration == generation) {
+                notifyVisiblePage();
+                notifyScrollProgress();
+            }
+        });
     }
 
     /** Restore each document directly to its saved page. Never publish page 0
