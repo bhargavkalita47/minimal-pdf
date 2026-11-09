@@ -26,6 +26,11 @@ public final class PickerWheel extends View {
     public interface Listener { void onSelected(int index); }
 
     private final List<String> labels = new ArrayList<>();
+    private final List<String> clippedLabels = new ArrayList<>();
+    private final android.graphics.Typeface regular =
+        android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL);
+    private final android.graphics.Typeface medium =
+        android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL);
     private final Paint background = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final TextPaint text = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final float density;
@@ -51,8 +56,7 @@ public final class PickerWheel extends View {
         setFocusable(true);
         setContentDescription("Scroll up or down to select");
         text.setTextAlign(Paint.Align.LEFT);
-        text.setTypeface(android.graphics.Typeface.create("sans-serif",
-            android.graphics.Typeface.NORMAL));
+        text.setTypeface(regular);
         text.setTextSize(15f * getResources().getDisplayMetrics().scaledDensity);
     }
 
@@ -63,6 +67,18 @@ public final class PickerWheel extends View {
     private void setPosition(float value) {
         position = clamp(value);
         invalidate();
+    }
+
+    @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        // Truncation is cached once instead of recomputed for every animation frame.
+        clippedLabels.clear();
+        float available = Math.max(1, w - 37*density);
+        text.setTypeface(medium);
+        for (String value : labels) {
+            clippedLabels.add(TextUtils.ellipsize(value, text,
+                available, TextUtils.TruncateAt.END).toString());
+        }
     }
 
     @Override protected void onDraw(Canvas canvas) {
@@ -89,11 +105,8 @@ public final class PickerWheel extends View {
             float weight = 1f - Math.min(1f, Math.abs(i-position));
             text.setColor(Color.WHITE);
             text.setAlpha(Math.round(255 * fade));
-            text.setTypeface(android.graphics.Typeface.create(
-                weight > .6f ? "sans-serif-medium" : "sans-serif",
-                android.graphics.Typeface.NORMAL));
-            String value = TextUtils.ellipsize(labels.get(i), text,
-                w - 37*density, TextUtils.TruncateAt.END).toString();
+            text.setTypeface(weight > .6f ? medium : regular);
+            String value = i < clippedLabels.size() ? clippedLabels.get(i) : labels.get(i);
             Paint.FontMetrics fm = text.getFontMetrics();
             canvas.drawText(value, 20*density,
                 centerY - (fm.ascent+fm.descent)/2f, text);
