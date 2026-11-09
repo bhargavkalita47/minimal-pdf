@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main, dev/edit-menu-direct-scrub-zoom]
+    branches: [main, dev/v1.8-live-scrub]
   workflow_dispatch:
 
 jobs:
