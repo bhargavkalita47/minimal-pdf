@@ -42,3 +42,8 @@ The [Build APK](../../actions/workflows/build-apk.yml) GitHub Actions workflow p
 The project uses native Android `PdfRenderer` for viewing and [PdfBox-Android](https://github.com/TomRoush/PdfBox-Android) (Apache-2.0) for editing pages without rasterization. AndroidX FileProvider securely shares a temporary PDF with other installed apps.
 
 Requires Android 8.0 or newer.
+
+### Version 1.10
+- A one-finger left/right swipe changes focused pages at every zoom level. Fast horizontal gestures navigate; slower movements can still pan zoomed content.
+- Changing a focused page preserves the selected zoom, rather than resetting to 150% after every swipe.
+- Switching between opened PDFs restores each document's previous page and its in-progress page ordering; document binding no longer announces page one before restoring the saved position.
