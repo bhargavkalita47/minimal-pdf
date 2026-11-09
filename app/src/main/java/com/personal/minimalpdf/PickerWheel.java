@@ -69,6 +69,17 @@ public final class PickerWheel extends View {
         invalidate();
     }
 
+    /** Follow a finger-driven selector without waiting for the gesture to end.
+     * Fractional positions keep the surrounding labels moving continuously. */
+    public void followDrag(float position) {
+        if (settle != null) settle.cancel();
+        setPosition(position);
+    }
+
+    public void animateTo(int index) {
+        settleAt(index, false);
+    }
+
     @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
         // Truncation is cached once instead of recomputed for every animation frame.
