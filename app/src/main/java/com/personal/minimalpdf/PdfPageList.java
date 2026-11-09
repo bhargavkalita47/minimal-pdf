@@ -125,6 +125,7 @@ public final class PdfPageList extends RecyclerView {
         pageOrder = order;
         inFlight.clear();
         bitmaps.evictAll();
+        searchHighlights.clear(); // Search highlights are specific to the previous PDF.
         adapter.notifyDataSetChanged();
         if (!pageOrder.isEmpty()) {
             int target = Math.max(0, Math.min(pageOrder.size() - 1, initialPage));
