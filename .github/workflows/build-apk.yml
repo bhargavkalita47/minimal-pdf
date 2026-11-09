@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main, fix/v1.14-reader-viewport-icon]
+    branches: [main, fix/v1.15-smooth-reader-chrome]
   workflow_dispatch:
 
 permissions:
