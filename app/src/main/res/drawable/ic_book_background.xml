@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <!-- A light, full-bleed launcher surface; the system applies its own mask. -->
+    <gradient
+        android:angle="315"
+        android:startColor="#FFF7F4"
+        android:centerColor="#FCE9E9"
+        android:endColor="#F3D1D9" />
+</shape>
