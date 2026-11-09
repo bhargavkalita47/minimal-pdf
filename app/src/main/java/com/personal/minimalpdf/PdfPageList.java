@@ -54,6 +54,7 @@ public final class PdfPageList extends RecyclerView {
     private PdfRenderer pdf;
     private volatile int generation = 0;
     private boolean restoringDocument;
+    private float readingProgress;
     public PdfPageList(Context context, PageListener listener) {
         super(context);
         this.listener = listener;
@@ -64,7 +65,8 @@ public final class PdfPageList extends RecyclerView {
         setItemAnimator(null);
         setHasFixedSize(false);
         setClipToPadding(false);
-        setPadding(0, dp(70), 0, dp(125));
+        // Never reserve invisible toolbar height inside the reader. Toolbars are overlays.
+        setPadding(0, dp(2), 0, dp(2));
         setItemViewCacheSize(3);
         setBackgroundColor(Color.rgb(229, 231, 235));
         addOnScrollListener(new OnScrollListener() {
@@ -102,14 +104,14 @@ public final class PdfPageList extends RecyclerView {
         if (row == null) return;
         float fractional = Math.max(0f, Math.min(1f,
             (getPaddingTop() - row.getTop()) / (float)Math.max(1, row.getHeight())));
-        listener.onScrollProgress(Math.min(adapter.getItemCount() - 1f,
-            first + fractional));
+        readingProgress = Math.min(adapter.getItemCount() - 1f, first + fractional);
+        listener.onScrollProgress(readingProgress);
     }
 
     /** Restore each document directly to its saved page. Never publish page 0
      * during binding: that old notification overwrote MainActivity's pageIndex,
      * making every PDF reopen at its first page. */
-    public void setDocument(PdfRenderer reader, List<Integer> order, int initialPage) {
+    public void setDocument(PdfRenderer reader, List<Integer> order, int initialPage, float initialProgress) {
         stopScroll();
         restoringDocument = true;
         final int request;
@@ -123,14 +125,23 @@ public final class PdfPageList extends RecyclerView {
         adapter.notifyDataSetChanged();
         if (!pageOrder.isEmpty()) {
             int target = Math.max(0, Math.min(pageOrder.size() - 1, initialPage));
-            layout.scrollToPositionWithOffset(target, dp(6));
-            listener.onScrollProgress(target);
+            float fraction = Math.max(0f, Math.min(.995f, initialProgress - target));
+            readingProgress = target + fraction;
+            layout.scrollToPositionWithOffset(target, dp(2));
             postOnAnimation(() -> {
                 if (generation != request || pdf == null) return;
-                restoringDocument = false;
-                // After layout, use the actual first visible page.
-                notifyVisiblePage();
-                notifyScrollProgress();
+                View row = layout.findViewByPosition(target);
+                if (row != null && fraction > 0f) {
+                    layout.scrollToPositionWithOffset(target,
+                        dp(2) - Math.round(fraction * row.getHeight()));
+                }
+                // Do not publish a transient wrong page during first layout.
+                postOnAnimation(() -> {
+                    if (generation != request || pdf == null) return;
+                    restoringDocument = false;
+                    notifyVisiblePage();
+                    notifyScrollProgress();
+                });
             });
         } else {
             restoringDocument = false;
@@ -139,6 +150,7 @@ public final class PdfPageList extends RecyclerView {
 
     public void clearDocument() {
         restoringDocument = false;
+        readingProgress = 0f;
         synchronized (renderLock) {
             generation++;
             pdf = null;
@@ -155,10 +167,13 @@ public final class PdfPageList extends RecyclerView {
         scrollToPage(currentPage);
     }
 
+    public float getReadingProgress() { return readingProgress; }
+
     public void scrollToPage(int index) {
         if (index < 0 || index >= adapter.getItemCount()) return;
         stopScroll();
-        layout.scrollToPositionWithOffset(index, dp(6));
+        layout.scrollToPositionWithOffset(index, dp(2));
+        readingProgress = index;
         listener.onVisiblePageChanged(index);
         listener.onScrollProgress(index);
     }
