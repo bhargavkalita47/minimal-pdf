@@ -76,3 +76,12 @@ Requires Android 8.0 or newer.
 - The continuous reader clips PDF pages to the unobscured viewport between the visible 59dp header and 103dp bottom toolbar, so text is not hidden under the interface.
 - A single tap still hides/shows the controls; the reader gains nearly the whole screen when they are hidden and preserves the scroll anchor when they return.
 - Replaced the old near-black adaptive icon background with a full-bleed light blush gradient, keeping the original red book logo clear on launcher shapes and avoiding dark empty borders.
+
+### Version 1.15 — fluid reading controls
+
+- Showing or hiding the header and bottom toolbar now animates the PDF's visible reading insets over 240ms, using matching easing and timing for the bars and content.
+- The first visible page stays anchored relative to the reading area throughout the animation so toggling controls doesn't suddenly move to another page.
+- Rapid repeated taps reverse the ongoing transition from its present position, rather than snapping to an endpoint.
+- Pages remain clipped outside the visible reader bounds once the controls finish appearing, while disappearing bars return the available space to the document smoothly.
+
+Phone verification: open a PDF, tap a page to hide/show controls repeatedly, and confirm both edges and the reading position move smoothly. Then try the same gesture while on page 2+ and while switching PDFs.
