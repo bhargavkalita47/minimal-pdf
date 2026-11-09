@@ -987,7 +987,9 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (wheelOverlay != null) {
+        if (editOverlay != null) {
+            dismissEditMenu(null);
+        } else if (wheelOverlay != null) {
             dismissWheel();
         } else if (focusOverlay != null) {
             closeFocus();
@@ -1454,6 +1456,11 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        if (editOverlay != null) {
+            editOverlay.animate().cancel();
+            if (host != null) host.removeView(editOverlay);
+            editOverlay = null;
+        }
         if (wheelOverlay != null) {
             wheelOverlay.animate().cancel();
             host.removeView(wheelOverlay);
