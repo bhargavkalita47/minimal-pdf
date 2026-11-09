@@ -12,6 +12,11 @@ import android.graphics.drawable.GradientDrawable;
 import android.graphics.pdf.PdfRenderer;
 import android.net.Uri;
 import android.os.Bundle;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import org.json.JSONException;
+import java.util.HashSet;
+import java.util.Set;
 import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
 import android.text.InputType;
@@ -53,10 +58,24 @@ public class MainActivity extends Activity {
         final String name;
         final ArrayList<Integer> order = new ArrayList<>();
         int page;
+        float progress;
+        final Set<Integer> bookmarks = new HashSet<>(); // Original page indexes
+        final ArrayList<Chapter> chapters = new ArrayList<>();
         DocumentSession(Uri uri, String name) { this.uri = uri; this.name = name; }
     }
+    private static final class Chapter {
+        final String title;
+        final int originalPage;
+        Chapter(String title, int originalPage) {
+            this.title = title;
+            this.originalPage = originalPage;
+        }
+    }
 
+    private static final String LIBRARY_PREF = "minimal_pdf_library_v2";
     private final ArrayList<DocumentSession> documents = new ArrayList<>();
+    private boolean restoringLibrary;
+    private final Runnable saveLibraryRunnable = () -> persistLibrary();
     private int activeDocument = -1;
     private Uri sourceUri;
     private ParcelFileDescriptor sourceFd;
@@ -130,6 +149,9 @@ public class MainActivity extends Activity {
                     ArrayList<Integer> order = entry.getIntegerArrayList("order");
                     if (order != null) session.order.addAll(order);
                     session.page = entry.getInt("page", 0);
+                    session.progress = entry.getFloat("progress", session.page);
+                    ArrayList<Integer> marks = entry.getIntegerArrayList("bookmarks");
+                    if (marks != null) session.bookmarks.addAll(marks);
                     documents.add(session);
                 }
                 if (!documents.isEmpty()) {
@@ -140,10 +162,9 @@ public class MainActivity extends Activity {
             chromeVisible = state.getBoolean("chrome_visible", true);
             applyChrome();
         }
-        if (documents.isEmpty()) {
-            Uri incoming = getIntent() == null ? null : getIntent().getData();
-            if (incoming != null) addDocuments(java.util.Collections.singletonList(incoming));
-        }
+        if (state == null) restoreSavedLibrary();
+        Uri incoming = getIntent() == null ? null : getIntent().getData();
+        if (incoming != null) addDocuments(java.util.Collections.singletonList(incoming));
         if (state != null) {
             chromeVisible = state.getBoolean("chrome_visible", true);
             applyChrome();
@@ -252,6 +273,10 @@ public class MainActivity extends Activity {
             @Override public void onScrollProgress(float fractionalPage) {
                 if (pageScrubber != null && renderer != null)
                     pageScrubber.setScrollPosition(fractionalPage);
+                if (activeDocument >= 0 && activeDocument < documents.size() && renderer != null) {
+                    documents.get(activeDocument).progress = fractionalPage;
+                    scheduleLibrarySave();
+                }
             }
         });
         pdfPages.setBackgroundColor(colors.canvas);
@@ -1199,6 +1224,76 @@ public class MainActivity extends Activity {
         current.order.clear();
         current.order.addAll(pageOrder);
         current.page = pageIndex;
+        current.progress = pdfPages == null ? pageIndex :
+            Math.max(0f, pdfPages.getReadingProgress());
+        scheduleLibrarySave();
+    }
+
+    private void scheduleLibrarySave() {
+        if (restoringLibrary || host == null) return;
+        uiHandler.removeCallbacks(saveLibraryRunnable);
+        uiHandler.postDelayed(saveLibraryRunnable, 800);
+    }
+
+    private void persistLibrary() {
+        if (restoringLibrary) return;
+        try {
+            JSONArray items = new JSONArray();
+            for (DocumentSession session : documents) {
+                JSONObject item = new JSONObject();
+                item.put("uri", session.uri.toString());
+                item.put("name", session.name);
+                item.put("page", session.page);
+                item.put("progress", session.progress);
+                JSONArray order = new JSONArray();
+                for (Integer page : session.order) order.put(page);
+                item.put("order", order);
+                JSONArray marks = new JSONArray();
+                for (Integer page : session.bookmarks) marks.put(page);
+                item.put("bookmarks", marks);
+                items.put(item);
+            }
+            JSONObject state = new JSONObject();
+            state.put("active", activeDocument);
+            state.put("documents", items);
+            getSharedPreferences(LIBRARY_PREF, MODE_PRIVATE).edit()
+                .putString("state", state.toString()).apply();
+        } catch (JSONException ignored) { }
+    }
+
+    private void restoreSavedLibrary() {
+        String saved = getSharedPreferences(LIBRARY_PREF, MODE_PRIVATE)
+            .getString("state", null);
+        if (saved == null || !documents.isEmpty()) return;
+        restoringLibrary = true;
+        try {
+            JSONObject state = new JSONObject(saved);
+            JSONArray items = state.optJSONArray("documents");
+            if (items == null) return;
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject entry = items.optJSONObject(i);
+                if (entry == null) continue;
+                String value = entry.optString("uri", "");
+                if (value.isEmpty()) continue;
+                DocumentSession session = new DocumentSession(
+                    Uri.parse(value), entry.optString("name", "document.pdf"));
+                session.page = Math.max(0, entry.optInt("page", 0));
+                session.progress = (float)entry.optDouble("progress", session.page);
+                JSONArray order = entry.optJSONArray("order");
+                if (order != null)
+                    for (int j = 0; j < order.length(); j++)
+                        session.order.add(order.optInt(j));
+                JSONArray marks = entry.optJSONArray("bookmarks");
+                if (marks != null)
+                    for (int j = 0; j < marks.length(); j++)
+                        session.bookmarks.add(marks.optInt(j));
+                documents.add(session);
+            }
+            if (!documents.isEmpty())
+                switchDocument(Math.max(0, Math.min(documents.size() - 1,
+                    state.optInt("active", 0))));
+        } catch (JSONException ignored) { }
+        finally { restoringLibrary = false; }
     }
 
     private void cancelRequestedDocumentSwitch() {
@@ -1237,13 +1332,16 @@ public class MainActivity extends Activity {
             Math.max(0, Math.min(pageOrder.size() - 1, chosen.page));
         // Bind and restore atomically; the old setDocument() forced a page-1
         // callback before this value could be applied.
-        pdfPages.setDocument(renderer, pageOrder, pageIndex);
+        pdfPages.setDocument(renderer, pageOrder, pageIndex,
+            chosen.progress);
         if (emptyView != null) emptyView.setVisibility(View.GONE);
         if (!chromeVisible) {
             chromeVisible = true;
             applyChrome();
         }
         refreshUI();
+        scheduleLibrarySave();
+        loadChapters(chosen);
     }
 
     /** Normal tap selection may open immediately; finger-driven changes use
@@ -1336,6 +1434,7 @@ public class MainActivity extends Activity {
         pageIndex = 0;
         documentName = "document.pdf";
         refreshUI();
+        scheduleLibrarySave();
     }
 
     private void closeDocument() {
@@ -1625,6 +1724,8 @@ public class MainActivity extends Activity {
             item.putString("name", session.name);
             item.putIntegerArrayList("order", new ArrayList<>(session.order));
             item.putInt("page", session.page);
+            item.putFloat("progress", session.progress);
+            item.putIntegerArrayList("bookmarks", new ArrayList<>(session.bookmarks));
             entries.add(item);
         }
         state.putParcelableArrayList("open_documents", entries);
@@ -1635,7 +1736,15 @@ public class MainActivity extends Activity {
         super.onConfigurationChanged(config);
     }
 
+    @Override protected void onStop() {
+        saveActiveSession();
+        uiHandler.removeCallbacks(saveLibraryRunnable);
+        persistLibrary();
+        super.onStop();
+    }
+
     @Override protected void onDestroy() {
+        uiHandler.removeCallbacks(saveLibraryRunnable);
         cancelRequestedDocumentSwitch();
         dismissDragPreview(false);
         documentWorker.shutdownNow();
