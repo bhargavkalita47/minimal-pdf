@@ -19,6 +19,7 @@ public final class FocusPageView extends View {
         void onDoubleTap();
         void onSingleTap();
         void onZoomChanged(float zoom);
+        void onHorizontalSwipe(int direction);
     }
 
     private final Actions actions;
@@ -48,6 +49,21 @@ public final class FocusPageView extends View {
             @Override public boolean onDoubleTap(MotionEvent e) {
                 actions.onDoubleTap();
                 return true;
+            }
+            @Override public boolean onFling(MotionEvent start, MotionEvent end,
+                                              float velocityX, float velocityY) {
+                if (start == null || end == null || movedWithFingers ||
+                    pinches.isInProgress()) return false;
+                float dx = end.getX() - start.getX();
+                float dy = end.getY() - start.getY();
+                float density = getResources().getDisplayMetrics().density;
+                if (Math.abs(dx) >= 65f * density &&
+                    Math.abs(dx) > Math.abs(dy) * 1.3f &&
+                    Math.abs(velocityX) >= 360f * density) {
+                    actions.onHorizontalSwipe(dx < 0 ? 1 : -1);
+                    return true;
+                }
+                return false;
             }
         });
 
