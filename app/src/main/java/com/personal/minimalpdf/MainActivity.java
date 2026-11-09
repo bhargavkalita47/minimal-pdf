@@ -432,6 +432,9 @@ public class MainActivity extends Activity {
         shareButton = addAction(actions, ReaderIcon.SHARE, "Share", view ->
             sharePages(new ArrayList<>(pageOrder)));
 
+        // Reader viewport must start below the header and end above the
+        // bottom toolbar. Hidden bars release that space for full-screen reading.
+        pdfPages.setReaderChromeVisible(chromeVisible);
         refreshUI();
     }
 
@@ -975,6 +978,7 @@ public class MainActivity extends Activity {
     }
 
     private void applyChrome() {
+        if (pdfPages != null) pdfPages.setReaderChromeVisible(chromeVisible);
         if (pageScrubber != null) pageScrubber.setChromeVisible(chromeVisible);
         animateBar(headerView, chromeVisible, true);
         animateBar(footerView, chromeVisible, false);
