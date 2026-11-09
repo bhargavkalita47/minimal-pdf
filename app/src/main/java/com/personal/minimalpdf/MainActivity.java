@@ -669,32 +669,133 @@ public class MainActivity extends Activity {
 
     private void showReaderMenu(View anchor) {
         android.widget.PopupMenu popup = new android.widget.PopupMenu(this, anchor);
-        popup.getMenu().add(0, 1, 0, "Edit PDF");
-        popup.getMenu().add(0, 2, 1, "Reset page order");
-        popup.getMenu().add(0, 3, 2, "Add more PDFs");
-        popup.getMenu().add(0, 4, 3, "Switch PDF");
-        popup.getMenu().add(0, 5, 4, "Close all documents");
+        popup.getMenu().add(0, 1, 0, "Manage open PDFs");
+        popup.getMenu().add(0, 2, 1, "Search in PDF");
+        popup.getMenu().add(0, 3, 2, "Bookmarks & chapters");
+        popup.getMenu().add(0, 4, 3, "Add more PDFs");
+        popup.getMenu().add(0, 5, 4,
+            hapticsEnabled ? "Selection vibration: On" : "Selection vibration: Off");
+        popup.getMenu().add(0, 6, 5, "Close all documents");
         popup.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
-                case 1:
-                    showEditMenu();
-                    return true;
-                case 2:
-                    resetPages();
-                    return true;
-                case 3:
-                    chooseDocument();
-                    return true;
-                case 4:
-                    showWheel(false);
-                    return true;
+                case 1: showLibraryManager(); return true;
+                case 2: searchPdf(); return true;
+                case 3: showBookmarksAndChapters(); return true;
+                case 4: chooseDocument(); return true;
                 case 5:
-                    closeAllDocuments();
+                    hapticsEnabled = !hapticsEnabled;
+                    getSharedPreferences(LIBRARY_PREF, MODE_PRIVATE).edit()
+                        .putBoolean("haptics", hapticsEnabled).apply();
+                    toast(hapticsEnabled ? "Selection vibration enabled" :
+                        "Selection vibration disabled");
                     return true;
+                case 6: closeAllDocuments(); return true;
             }
             return false;
         });
         popup.show();
+    }
+
+    private void moveOpenDocument(int from, int to) {
+        if (from < 0 || from >= documents.size() ||
+            to < 0 || to >= documents.size() || from == to) return;
+        saveActiveSession();
+        DocumentSession active = activeDocument >= 0 ? documents.get(activeDocument) : null;
+        DocumentSession item = documents.remove(from);
+        documents.add(to, item);
+        activeDocument = active == null ? -1 : documents.indexOf(active);
+        scheduleLibrarySave();
+    }
+
+    private void closeOpenDocument(int index) {
+        if (index < 0 || index >= documents.size()) return;
+        cancelRequestedDocumentSwitch();
+        saveActiveSession();
+        boolean closingActive = index == activeDocument;
+        if (closingActive) closeDocument();
+        documents.remove(index);
+        if (closingActive) {
+            activeDocument = -1;
+            if (!documents.isEmpty()) {
+                switchDocument(Math.min(index, documents.size() - 1));
+            } else {
+                pageOrder.clear();
+                sourceUri = null;
+                pageIndex = 0;
+                documentName = "document.pdf";
+                refreshUI();
+            }
+        } else if (index < activeDocument) {
+            activeDocument--;
+        }
+        scheduleLibrarySave();
+    }
+
+    private void showLibraryManager() {
+        LinearLayout frame = new LinearLayout(this);
+        frame.setOrientation(LinearLayout.VERTICAL);
+        frame.setPadding(dp(16), dp(8), dp(16), dp(12));
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(list, new android.widget.ScrollView.LayoutParams(-1, -2));
+        frame.addView(scroll, new LinearLayout.LayoutParams(-1,
+            Math.min(dp(440), getResources().getDisplayMetrics().heightPixels / 2)));
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("Open PDFs")
+            .setView(frame)
+            .setPositiveButton("+ Add PDFs", (d, n) -> chooseDocument())
+            .setNegativeButton("Done", null)
+            .create();
+        if (documents.isEmpty()) {
+            TextView none = text("No documents open", 14, colors.mutedText, false);
+            list.addView(none);
+        }
+        for (int i = 0; i < documents.size(); i++) {
+            final int position = i;
+            DocumentSession session = documents.get(i);
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, dp(4), 0, dp(4));
+            list.addView(row, new LinearLayout.LayoutParams(-1, dp(65)));
+
+            TextView name = text((i == activeDocument ? "●  " : "") +
+                shortName(session.name) + "\nPage " + (session.page + 1) +
+                (session.bookmarks.isEmpty() ? "" :
+                    "  · " + session.bookmarks.size() + " bookmarks"),
+                13, colors.foreground, i == activeDocument);
+            name.setMaxLines(2);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            name.setGravity(Gravity.CENTER_VERTICAL);
+            row.addView(name, new LinearLayout.LayoutParams(0, -1, 1));
+            name.setOnClickListener(view -> {
+                dialog.dismiss();
+                switchDocument(position);
+            });
+
+            Button up = button("↑", view -> {
+                moveOpenDocument(position, position - 1);
+                dialog.dismiss();
+                showLibraryManager();
+            });
+            up.setEnabled(position > 0);
+            row.addView(up, new LinearLayout.LayoutParams(dp(38), dp(45)));
+            Button down = button("↓", view -> {
+                moveOpenDocument(position, position + 1);
+                dialog.dismiss();
+                showLibraryManager();
+            });
+            down.setEnabled(position < documents.size() - 1);
+            row.addView(down, new LinearLayout.LayoutParams(dp(38), dp(45)));
+            Button close = button("×", view -> {
+                closeOpenDocument(position);
+                dialog.dismiss();
+                showLibraryManager();
+            });
+            close.setContentDescription("Close " + session.name);
+            row.addView(close, new LinearLayout.LayoutParams(dp(38), dp(45)));
+        }
+        dialog.show();
     }
 
     private String shortName(String name) {
@@ -753,8 +854,11 @@ public class MainActivity extends Activity {
             for (int i = 0; i < pageOrder.size(); i++)
                 items.add("Page " + (i + 1));
         } else {
-            for (DocumentSession session : documents)
-                items.add(shortName(session.name));
+            for (int i = 0; i < documents.size(); i++) {
+                DocumentSession session = documents.get(i);
+                items.add((i == activeDocument ? "● " : "") +
+                    shortName(session.name) + "  · p " + (session.page + 1));
+            }
         }
         if (items.isEmpty()) return;
 
@@ -816,6 +920,13 @@ public class MainActivity extends Activity {
                 chooseDocument();
             });
             card.addView(add, new LinearLayout.LayoutParams(-1, dp(43)));
+            TextView manage = text("Manage open PDFs", 13, Color.WHITE, true);
+            manage.setGravity(Gravity.CENTER);
+            manage.setOnClickListener(view -> {
+                dismissWheel();
+                showLibraryManager();
+            });
+            card.addView(manage, new LinearLayout.LayoutParams(-1, dp(40)));
         } else {
             // Same vertical wheel center for documents and pages.
             card.addView(new View(this), new LinearLayout.LayoutParams(-1, dp(43)));
