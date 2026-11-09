@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main, dev/v1.13-book-app-icon]
+    branches: [main, fix/v1.14-reader-viewport-icon]
   workflow_dispatch:
 
 permissions:
