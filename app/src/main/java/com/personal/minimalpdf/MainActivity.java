@@ -66,6 +66,10 @@ public class MainActivity extends Activity {
     private int pageIndex = 0;
     private String documentName = "document.pdf";
     private PdfPageList pdfPages;
+    private ZoomScrollView normalPan;
+    private android.view.ScaleGestureDetector readerPinch;
+    private boolean downInReader;
+    private boolean capturingPinch;
     private FrameLayout host;
     private View headerView, footerView, topDivider, bottomDivider;
     private boolean chromeVisible = true;
@@ -104,6 +108,23 @@ public class MainActivity extends Activity {
         styleSystemBars();
         PDFBoxResourceLoader.init(getApplicationContext());
         buildInterface();
+        readerPinch = new android.view.ScaleGestureDetector(this,
+            new android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                @Override public boolean onScaleBegin(
+                        android.view.ScaleGestureDetector detector) {
+                    return true;
+                }
+                @Override public boolean onScale(
+                        android.view.ScaleGestureDetector detector) {
+                    if (pdfPages == null || normalPan == null || focusOverlay != null) return false;
+                    int[] origin = new int[2];
+                    normalPan.getLocationInWindow(origin);
+                    pdfPages.pinchBy(detector.getScaleFactor(),
+                        detector.getFocusX() - origin[0],
+                        detector.getFocusY() - origin[1]);
+                    return true;
+                }
+            });
         if (state != null) {
             ArrayList<Bundle> stored = state.getParcelableArrayList("open_documents");
             if (stored != null) {
@@ -133,6 +154,67 @@ public class MainActivity extends Activity {
             chromeVisible = state.getBoolean("chrome_visible", true);
             applyChrome();
         }
+    }
+
+    private boolean touchInside(View view, float x, float y) {
+        if (view == null || view.getVisibility() != View.VISIBLE || view.getAlpha() < .08f)
+            return false;
+        int[] at = new int[2];
+        view.getLocationInWindow(at);
+        return x >= at[0] && x <= at[0] + view.getWidth()
+            && y >= at[1] && y <= at[1] + view.getHeight();
+    }
+
+    private boolean validReaderTouch(android.view.MotionEvent event) {
+        if (renderer == null || busy || normalPan == null || pdfPages == null
+            || focusOverlay != null || wheelOverlay != null || editOverlay != null)
+            return false;
+        float x = event.getX(), y = event.getY();
+        if (!touchInside(normalPan, x, y)) return false;
+        // The scroll view extends behind the toolbar; exclude those controls.
+        if (touchInside(headerView, x, y) || touchInside(footerView, x, y)
+            || touchInside(pageScrubber, x, y)) return false;
+        return true;
+    }
+
+    /**
+     * The Activity receives all pointer events before nested views do.
+     * Capturing the second finger here prevents horizontal/vertical scroll
+     * containers from cancelling pinch gestures or interpreting them as taps.
+     */
+    @Override public boolean dispatchTouchEvent(android.view.MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action == android.view.MotionEvent.ACTION_DOWN) {
+            downInReader = validReaderTouch(event);
+            capturingPinch = false;
+        }
+        if (downInReader && readerPinch != null) {
+            readerPinch.onTouchEvent(event);
+            if (!capturingPinch &&
+                    action == android.view.MotionEvent.ACTION_POINTER_DOWN &&
+                    event.getPointerCount() >= 2) {
+                capturingPinch = true;
+                android.view.MotionEvent cancel = android.view.MotionEvent.obtain(event);
+                cancel.setAction(android.view.MotionEvent.ACTION_CANCEL);
+                super.dispatchTouchEvent(cancel);
+                cancel.recycle();
+                return true;
+            }
+            if (capturingPinch) {
+                if (action == android.view.MotionEvent.ACTION_UP
+                    || action == android.view.MotionEvent.ACTION_CANCEL) {
+                    capturingPinch = false;
+                    downInReader = false;
+                }
+                return true;
+            }
+        }
+        if (action == android.view.MotionEvent.ACTION_UP ||
+            action == android.view.MotionEvent.ACTION_CANCEL) {
+            downInReader = false;
+            capturingPinch = false;
+        }
+        return super.dispatchTouchEvent(event);
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -221,6 +303,7 @@ public class MainActivity extends Activity {
         host.addView(content, new FrameLayout.LayoutParams(-1, -1));
 
         ZoomScrollView pan = new ZoomScrollView(this);
+        normalPan = pan;
         pdfPages = new PdfPageList(this, pan, new PdfPageList.PageListener() {
             @Override public void onVisiblePageChanged(int position) {
                 if (renderer != null && pageIndex != position) {
