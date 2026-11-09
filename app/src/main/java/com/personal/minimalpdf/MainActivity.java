@@ -80,13 +80,14 @@ public class MainActivity extends Activity {
     private View emptyView;
     private TextView fileLabel;
     private TextView pageLabel;
-    private ReaderIcon saveButton;
+    private ReaderIcon editButton;
     private ReaderIcon shareButton;
     private ReaderIcon openButton;
     private PageScrubber pageScrubber;
     private TextView documentSelector;
     private TextView pageSelector;
     private FrameLayout wheelOverlay;
+    private FrameLayout editOverlay;
     private PickerWheel pickerWheel;
     private int barBackground, barForeground, barMuted;
     private boolean busy = false;
@@ -339,6 +340,7 @@ public class MainActivity extends Activity {
         documentSelector.setEllipsize(android.text.TextUtils.TruncateAt.END);
         documentSelector.setContentDescription("Choose loaded PDF");
         documentSelector.setOnClickListener(view -> showWheel(false));
+        enableSelectorScrub(documentSelector, false);
         paging.addView(documentSelector, new LinearLayout.LayoutParams(0, dp(42), 1));
 
         pageSelector = text("— / — ▾", 12, barForeground, true);
@@ -346,6 +348,7 @@ public class MainActivity extends Activity {
         pageSelector.setGravity(Gravity.CENTER);
         pageSelector.setContentDescription("Scroll to select a page");
         pageSelector.setOnClickListener(view -> showWheel(true));
+        enableSelectorScrub(pageSelector, true);
         LinearLayout.LayoutParams pageParams = new LinearLayout.LayoutParams(dp(100), dp(42));
         pageParams.leftMargin = dp(4);
         paging.addView(pageSelector, pageParams);
@@ -370,12 +373,11 @@ public class MainActivity extends Activity {
         actions.setGravity(Gravity.CENTER);
         actions.setPadding(dp(4), dp(1), dp(4), dp(3));
         footer.addView(actions, new LinearLayout.LayoutParams(-1, dp(67)));
-        addAction(actions, ReaderIcon.PAGES, "Pages", view -> showPages());
-        addAction(actions, ReaderIcon.MOVE, "Move", view -> movePage());
-        addAction(actions, ReaderIcon.EXTRACT, "Extract", view -> extractPages());
-        addAction(actions, ReaderIcon.DELETE, "Remove", view -> removeCurrentPage());
-        saveButton = addAction(actions, ReaderIcon.SAVE, "Save", view ->
-            chooseSaveDestination(new ArrayList<>(pageOrder), "-edited"));
+        addAction(actions, ReaderIcon.PAGES, "Pages", view -> showWheel(true));
+        editButton = addAction(actions, ReaderIcon.EDIT, "Edit", view -> showEditMenu());
+        addAction(actions, ReaderIcon.SHARE, "Share", view ->
+            sharePages(new ArrayList<>(pageOrder)));
+        addAction(actions, ReaderIcon.OPEN, "Add PDF", view -> chooseDocument());
 
         refreshUI();
     }
@@ -404,28 +406,16 @@ public class MainActivity extends Activity {
 
     private void showReaderMenu(View anchor) {
         android.widget.PopupMenu popup = new android.widget.PopupMenu(this, anchor);
-        popup.getMenu().add(0, 1, 0, "Save edited copy");
-        popup.getMenu().add(0, 2, 1, "Reset page order");
-        popup.getMenu().add(0, 3, 2, "Add more PDFs");
-        popup.getMenu().add(0, 4, 3, "Switch PDF");
-        popup.getMenu().add(0, 5, 4, "Close all documents");
+        popup.getMenu().add(0, 1, 0, "Edit PDF");
+        popup.getMenu().add(0, 2, 1, "Add more PDFs");
+        popup.getMenu().add(0, 3, 2, "Switch PDF");
+        popup.getMenu().add(0, 4, 3, "Close all documents");
         popup.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
-                case 1:
-                    if (ready()) chooseSaveDestination(new ArrayList<>(pageOrder), "-edited");
-                    return true;
-                case 2:
-                    resetPages();
-                    return true;
-                case 3:
-                    chooseDocument();
-                    return true;
-                case 4:
-                    showWheel(false);
-                    return true;
-                case 5:
-                    closeAllDocuments();
-                    return true;
+                case 1: showEditMenu(); return true;
+                case 2: chooseDocument(); return true;
+                case 3: showWheel(false); return true;
+                case 4: closeAllDocuments(); return true;
             }
             return false;
         });
@@ -763,7 +753,7 @@ public class MainActivity extends Activity {
     private void refreshUI() {
         boolean has = renderer != null && !pageOrder.isEmpty();
         boolean enabled = has && !busy;
-        if (saveButton != null) saveButton.setEnabled(enabled);
+        if (editButton != null) editButton.setEnabled(enabled);
         if (shareButton != null) {
             shareButton.setEnabled(enabled);
             shareButton.setAlpha(enabled ? 1f : .40f);
@@ -780,8 +770,8 @@ public class MainActivity extends Activity {
 
     private void setBusy(boolean value) {
         busy = value;
-        if (saveButton != null)
-            saveButton.setContentDescription(value ? "Saving PDF…" : "Save PDF");
+        if (editButton != null)
+            editButton.setContentDescription(value ? "Working…" : "Edit PDF");
         refreshUI();
     }
 
