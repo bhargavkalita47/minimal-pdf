@@ -48,6 +48,16 @@ public class MainActivity extends Activity {
     private UiPalette colors;
     private final ArrayList<View> documentButtons = new ArrayList<>();
 
+    private static final class DocumentSession {
+        final Uri uri;
+        final String name;
+        final ArrayList<Integer> order = new ArrayList<>();
+        int page;
+        DocumentSession(Uri uri, String name) { this.uri = uri; this.name = name; }
+    }
+
+    private final ArrayList<DocumentSession> documents = new ArrayList<>();
+    private int activeDocument = -1;
     private Uri sourceUri;
     private ParcelFileDescriptor sourceFd;
     private PdfRenderer renderer;
@@ -90,21 +100,30 @@ public class MainActivity extends Activity {
         styleSystemBars();
         PDFBoxResourceLoader.init(getApplicationContext());
         buildInterface();
-        String savedUri = state == null ? null : state.getString("open_uri");
-        Uri incoming = savedUri == null
-            ? (getIntent() == null ? null : getIntent().getData()) : Uri.parse(savedUri);
-        if (incoming != null) {
-            openDocument(incoming);
-            if (renderer != null && state != null && savedUri != null) {
-                ArrayList<Integer> savedOrder = state.getIntegerArrayList("page_order");
-                if (validOrder(savedOrder)) {
-                    pageOrder.clear();
-                    pageOrder.addAll(savedOrder);
-                    pageIndex = Math.min(Math.max(0, state.getInt("page_index", 0)), pageOrder.size() - 1);
-                    pdfPages.pagesChanged(pageIndex);
-                    refreshUI();
+        if (state != null) {
+            ArrayList<Bundle> stored = state.getParcelableArrayList("open_documents");
+            if (stored != null) {
+                for (Bundle entry : stored) {
+                    if (entry == null || entry.getString("uri") == null) continue;
+                    DocumentSession session = new DocumentSession(
+                        Uri.parse(entry.getString("uri")),
+                        entry.getString("name", "document.pdf"));
+                    ArrayList<Integer> order = entry.getIntegerArrayList("order");
+                    if (order != null) session.order.addAll(order);
+                    session.page = entry.getInt("page", 0);
+                    documents.add(session);
+                }
+                if (!documents.isEmpty()) {
+                    switchDocument(Math.max(0, Math.min(documents.size() - 1,
+                        state.getInt("active_document", 0))));
                 }
             }
+            chromeVisible = state.getBoolean("chrome_visible", true);
+            applyChrome();
+        }
+        if (documents.isEmpty()) {
+            Uri incoming = getIntent() == null ? null : getIntent().getData();
+            if (incoming != null) addDocuments(java.util.Collections.singletonList(incoming));
         }
         if (state != null) {
             chromeVisible = state.getBoolean("chrome_visible", true);
@@ -115,7 +134,8 @@ public class MainActivity extends Activity {
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        if (intent != null && intent.getData() != null && !busy) openDocument(intent.getData());
+        if (intent != null && intent.getData() != null && !busy)
+            addDocuments(java.util.Collections.singletonList(intent.getData()));
     }
 
     private int dp(float value) {
@@ -263,10 +283,7 @@ public class MainActivity extends Activity {
 
         ReaderIcon back = iconButton(ReaderIcon.BACK, "Back", view -> {
             if (renderer != null) {
-                closeDocument();
-                pageOrder.clear();
-                sourceUri = null;
-                refreshUI();
+                closeAllDocuments();
             } else finish();
         });
         header.addView(back, new LinearLayout.LayoutParams(dp(47), dp(49)));
@@ -675,6 +692,7 @@ public class MainActivity extends Activity {
         Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         picker.addCategory(Intent.CATEGORY_OPENABLE);
         picker.setType("application/pdf");
+        picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         picker.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         startActivityForResult(picker, OPEN_FILE);
     }
@@ -682,12 +700,23 @@ public class MainActivity extends Activity {
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == OPEN_FILE) {
-            if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
-            try {
-                getContentResolver().takePersistableUriPermission(
-                    data.getData(), Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            } catch (SecurityException ignored) { }
-            openDocument(data.getData());
+            if (resultCode != RESULT_OK || data == null) return;
+            ArrayList<Uri> picked = new ArrayList<>();
+            if (data.getClipData() != null) {
+                for (int i = 0; i < data.getClipData().getItemCount(); i++) {
+                    Uri item = data.getClipData().getItemAt(i).getUri();
+                    if (item != null && !picked.contains(item)) picked.add(item);
+                }
+            }
+            if (data.getData() != null && !picked.contains(data.getData()))
+                picked.add(data.getData());
+            for (Uri item : picked) {
+                try {
+                    getContentResolver().takePersistableUriPermission(
+                        item, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                } catch (SecurityException ignored) { }
+            }
+            addDocuments(picked);
         } else if (requestCode == SAVE_FILE) {
             ArrayList<Integer> selected = pendingSavePages;
             pendingSavePages = null;
@@ -706,32 +735,84 @@ public class MainActivity extends Activity {
         return "document.pdf";
     }
 
-    private void openDocument(Uri uri) {
-        if (busy) return;
+    private void addDocuments(List<Uri> picked) {
+        if (busy || picked == null || picked.isEmpty()) return;
+        int firstNew = -1;
+        for (Uri uri : picked) {
+            if (uri == null) continue;
+            int existing = -1;
+            for (int i = 0; i < documents.size(); i++)
+                if (documents.get(i).uri.equals(uri)) { existing = i; break; }
+            if (existing >= 0) {
+                if (firstNew < 0) firstNew = existing;
+            } else {
+                documents.add(new DocumentSession(uri, getDocumentName(uri)));
+                if (firstNew < 0) firstNew = documents.size() - 1;
+            }
+        }
+        if (firstNew >= 0) switchDocument(firstNew);
+    }
+
+    private void saveActiveSession() {
+        if (activeDocument < 0 || activeDocument >= documents.size() || renderer == null)
+            return;
+        DocumentSession current = documents.get(activeDocument);
+        current.order.clear();
+        current.order.addAll(pageOrder);
+        current.page = pageIndex;
+    }
+
+    private void switchDocument(int position) {
+        if (busy || position < 0 || position >= documents.size()) return;
+        if (position == activeDocument && renderer != null) return;
+        DocumentSession chosen = documents.get(position);
         try {
-            ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(uri, "r");
+            ParcelFileDescriptor descriptor =
+                getContentResolver().openFileDescriptor(chosen.uri, "r");
             if (descriptor == null) throw new Exception("Could not read file");
-            PdfRenderer newRenderer;
-            try { newRenderer = new PdfRenderer(descriptor); }
+            PdfRenderer next;
+            try { next = new PdfRenderer(descriptor); }
             catch (Exception error) { descriptor.close(); throw error; }
+
+            saveActiveSession();
             closeDocument();
-            renderer = newRenderer;
             sourceFd = descriptor;
-            sourceUri = uri;
-            documentName = getDocumentName(uri);
+            renderer = next;
+            sourceUri = chosen.uri;
+            documentName = chosen.name;
+            activeDocument = position;
             pageOrder.clear();
-            for (int index = 0; index < renderer.getPageCount(); index++) pageOrder.add(index);
-            pageIndex = 0;
+            if (validOrder(chosen.order)) {
+                pageOrder.addAll(chosen.order);
+            } else {
+                for (int i = 0; i < renderer.getPageCount(); i++) pageOrder.add(i);
+                chosen.order.clear();
+                chosen.order.addAll(pageOrder);
+                chosen.page = 0;
+            }
+            pageIndex = Math.max(0, Math.min(pageOrder.size() - 1, chosen.page));
+            pdfPages.setDocument(renderer, pageOrder);
+            pdfPages.scrollToPage(pageIndex);
+            if (emptyView != null) emptyView.setVisibility(View.GONE);
+            if (zoomButton != null) zoomButton.setText("100% ▾");
             chromeVisible = true;
             applyChrome();
-            pdfPages.setDocument(renderer, pageOrder);
-            showPageBadge();
-            if (zoomButton != null) zoomButton.setText("100% ▾");
-            emptyView.setVisibility(View.GONE);
             refreshUI();
         } catch (Exception error) {
             toast("Could not open PDF: " + error.getMessage());
         }
+    }
+
+    private void closeAllDocuments() {
+        dismissWheel();
+        closeDocument();
+        documents.clear();
+        activeDocument = -1;
+        sourceUri = null;
+        pageOrder.clear();
+        pageIndex = 0;
+        documentName = "document.pdf";
+        refreshUI();
     }
 
     private void closeDocument() {
@@ -1013,11 +1094,18 @@ public class MainActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
         state.putBoolean("chrome_visible", chromeVisible);
-        if (sourceUri != null && renderer != null) {
-            state.putString("open_uri", sourceUri.toString());
-            state.putIntegerArrayList("page_order", new ArrayList<>(pageOrder));
-            state.putInt("page_index", pageIndex);
+        saveActiveSession();
+        ArrayList<Bundle> entries = new ArrayList<>();
+        for (DocumentSession session : documents) {
+            Bundle item = new Bundle();
+            item.putString("uri", session.uri.toString());
+            item.putString("name", session.name);
+            item.putIntegerArrayList("order", new ArrayList<>(session.order));
+            item.putInt("page", session.page);
+            entries.add(item);
         }
+        state.putParcelableArrayList("open_documents", entries);
+        state.putInt("active_document", activeDocument);
     }
 
     @Override public void onConfigurationChanged(Configuration config) {
