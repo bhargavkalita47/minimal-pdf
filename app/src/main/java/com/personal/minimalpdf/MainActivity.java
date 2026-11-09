@@ -67,7 +67,7 @@ public class MainActivity extends Activity {
     private String documentName = "document.pdf";
     private PdfPageList pdfPages;
     private ZoomScrollView normalPan;
-    private android.view.ScaleGestureDetector readerPinch;
+    private float lastPinchSpan;
     private boolean downInReader;
     private boolean capturingPinch;
     private FrameLayout host;
@@ -108,23 +108,6 @@ public class MainActivity extends Activity {
         styleSystemBars();
         PDFBoxResourceLoader.init(getApplicationContext());
         buildInterface();
-        readerPinch = new android.view.ScaleGestureDetector(this,
-            new android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
-                @Override public boolean onScaleBegin(
-                        android.view.ScaleGestureDetector detector) {
-                    return true;
-                }
-                @Override public boolean onScale(
-                        android.view.ScaleGestureDetector detector) {
-                    if (pdfPages == null || normalPan == null || focusOverlay != null) return false;
-                    int[] origin = new int[2];
-                    normalPan.getLocationInWindow(origin);
-                    pdfPages.pinchBy(detector.getScaleFactor(),
-                        detector.getFocusX() - origin[0],
-                        detector.getFocusY() - origin[1]);
-                    return true;
-                }
-            });
         if (state != null) {
             ArrayList<Bundle> stored = state.getParcelableArrayList("open_documents");
             if (stored != null) {
@@ -178,33 +161,69 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * The Activity receives all pointer events before nested views do.
-     * Capturing the second finger here prevents horizontal/vertical scroll
-     * containers from cancelling pinch gestures or interpreting them as taps.
+     * The Activity receives multi-touch before nested vertical/horizontal
+     * scroll views. Finger-distance ratios avoid the gesture start threshold
+     * of ScaleGestureDetector, which missed short pinches in emulator tests.
      */
+    private void applyReaderPinch(android.view.MotionEvent event) {
+        if (event.getPointerCount() < 2 || normalPan == null || pdfPages == null)
+            return;
+        float dx = event.getX(1) - event.getX(0);
+        float dy = event.getY(1) - event.getY(0);
+        float span = (float) Math.hypot(dx, dy);
+        if (!Float.isFinite(span) || span < dp(8)) return;
+        if (lastPinchSpan >= dp(8)) {
+            float ratio = span / lastPinchSpan;
+            // Prevent sudden jumps on dropped frames or noisy touch samples.
+            float factor = Math.max(.72f, Math.min(1.35f, ratio));
+            int[] origin = new int[2];
+            normalPan.getLocationInWindow(origin);
+            float focusX = (event.getX(0) + event.getX(1)) / 2f - origin[0];
+            float focusY = (event.getY(0) + event.getY(1)) / 2f - origin[1];
+            pdfPages.pinchBy(factor, focusX, focusY);
+        }
+        lastPinchSpan = span;
+    }
+
     @Override public boolean dispatchTouchEvent(android.view.MotionEvent event) {
         int action = event.getActionMasked();
         if (action == android.view.MotionEvent.ACTION_DOWN) {
             downInReader = validReaderTouch(event);
             capturingPinch = false;
+            lastPinchSpan = 0f;
         }
-        if (downInReader && readerPinch != null) {
-            readerPinch.onTouchEvent(event);
+        if (downInReader) {
             if (!capturingPinch &&
-                    action == android.view.MotionEvent.ACTION_POINTER_DOWN &&
-                    event.getPointerCount() >= 2) {
+                action == android.view.MotionEvent.ACTION_POINTER_DOWN &&
+                event.getPointerCount() >= 2) {
                 capturingPinch = true;
-                android.view.MotionEvent cancel = android.view.MotionEvent.obtain(event);
+                lastPinchSpan = 0f;
+                applyReaderPinch(event);
+                // Cancel the single-finger child gesture, without letting it
+                // consume later two-finger motion.
+                android.view.MotionEvent cancel =
+                    android.view.MotionEvent.obtain(event);
                 cancel.setAction(android.view.MotionEvent.ACTION_CANCEL);
                 super.dispatchTouchEvent(cancel);
                 cancel.recycle();
                 return true;
             }
             if (capturingPinch) {
-                if (action == android.view.MotionEvent.ACTION_UP
-                    || action == android.view.MotionEvent.ACTION_CANCEL) {
+                if (action == android.view.MotionEvent.ACTION_MOVE
+                        && event.getPointerCount() >= 2) {
+                    applyReaderPinch(event);
+                } else if (action == android.view.MotionEvent.ACTION_POINTER_DOWN
+                        && event.getPointerCount() >= 2) {
+                    lastPinchSpan = 0f;
+                    applyReaderPinch(event);
+                } else if (action == android.view.MotionEvent.ACTION_POINTER_UP) {
+                    lastPinchSpan = 0f;
+                }
+                if (action == android.view.MotionEvent.ACTION_UP ||
+                    action == android.view.MotionEvent.ACTION_CANCEL) {
                     capturingPinch = false;
                     downInReader = false;
+                    lastPinchSpan = 0f;
                 }
                 return true;
             }
@@ -213,6 +232,7 @@ public class MainActivity extends Activity {
             action == android.view.MotionEvent.ACTION_CANCEL) {
             downInReader = false;
             capturingPinch = false;
+            lastPinchSpan = 0f;
         }
         return super.dispatchTouchEvent(event);
     }
