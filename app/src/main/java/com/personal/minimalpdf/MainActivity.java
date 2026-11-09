@@ -468,56 +468,155 @@ public class MainActivity extends Activity {
 
     /** A vertical swipe directly on the bottom-left label opens the same wheel
      * and preselects the swiped-to item; tapping still opens the wheel normally. */
+    /** Direct selector drag: the wheel follows the finger while the actual
+     * page/PDF is updated continuously; the full menu opens on tap only. */
+    private void beginDragPreview(boolean pages, int startIndex) {
+        dismissDragPreview(false);
+        ArrayList<String> names = new ArrayList<>();
+        if (pages) {
+            for (int i = 0; i < pageOrder.size(); i++) names.add("Page " + (i + 1));
+        } else {
+            for (DocumentSession session : documents) names.add(shortName(session.name));
+        }
+        if (names.isEmpty()) return;
+
+        FrameLayout overlay = new FrameLayout(this);
+        dragPreviewOverlay = overlay;
+        overlay.setAlpha(0f);
+        overlay.setClickable(false);
+        host.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+
+        PickerWheel wheel = new PickerWheel(this, names, startIndex, selected -> { });
+        dragPreviewWheel = wheel;
+        wheel.setEnabled(false);
+        int width = Math.min(dp(276), getResources().getDisplayMetrics().widthPixels - dp(28));
+        int height = Math.min(dp(284), getResources().getDisplayMetrics().heightPixels - dp(185));
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+            width, Math.max(dp(150), height), Gravity.BOTTOM | Gravity.START);
+        params.leftMargin = dp(12);
+        params.bottomMargin = dp(113);
+        overlay.addView(wheel, params);
+        overlay.animate().alpha(1f).setDuration(105).start();
+    }
+
+    private void dismissDragPreview(boolean animate) {
+        if (dragPreviewHide != null) {
+            uiHandler.removeCallbacks(dragPreviewHide);
+            dragPreviewHide = null;
+        }
+        FrameLayout overlay = dragPreviewOverlay;
+        dragPreviewOverlay = null;
+        dragPreviewWheel = null;
+        if (overlay == null) return;
+        overlay.animate().cancel();
+        Runnable finish = () -> {
+            if (host != null && overlay.getParent() == host) host.removeView(overlay);
+        };
+        if (animate) {
+            overlay.animate().alpha(0f).setDuration(150)
+                .withEndAction(finish).start();
+        } else finish.run();
+    }
+
+    private void closeDragPreviewSoon(int selection) {
+        if (dragPreviewWheel != null) dragPreviewWheel.animateTo(selection);
+        if (dragPreviewHide != null) uiHandler.removeCallbacks(dragPreviewHide);
+        dragPreviewHide = () -> dismissDragPreview(true);
+        uiHandler.postDelayed(dragPreviewHide, 220);
+    }
+
+    private void jumpPageLive(int index) {
+        if (renderer == null || index < 0 || index >= pageOrder.size()) return;
+        pageIndex = index;
+        pendingPageJump = index;
+        if (pageSelector != null)
+            pageSelector.setText((index + 1) + " / " + pageOrder.size() + "  ▾");
+        if (pageScrubber != null) pageScrubber.setPage(index, pageOrder.size());
+        if (pageJumpQueued) return;
+        pageJumpQueued = true;
+        pdfPages.postOnAnimation(() -> {
+            pageJumpQueued = false;
+            if (renderer != null && pendingPageJump >= 0 &&
+                pendingPageJump < pageOrder.size()) {
+                pdfPages.scrollToPage(pendingPageJump);
+                refreshUI();
+            }
+        });
+    }
+
     private final class DirectWheelGesture implements View.OnTouchListener {
         private final boolean pages;
+        private final float threshold = dp(7);
+        private final float rowDistance = dp(34);
         private float startY;
         private boolean dragging;
         private int initial;
-        private int selection;
-        private final int threshold = dp(7);
+        private int lastSelection;
 
         DirectWheelGesture(boolean pages) { this.pages = pages; }
 
+        private int selectionAt(float rawY) {
+            int max = pages ? pageOrder.size() : documents.size();
+            if (max == 0) return 0;
+            return Math.max(0, Math.min(max - 1,
+                Math.round(initial + (startY - rawY) / rowDistance)));
+        }
+
+        private float progressAt(float rawY) {
+            int max = pages ? pageOrder.size() : documents.size();
+            return Math.max(0f, Math.min(Math.max(0, max - 1),
+                initial + (startY - rawY) / rowDistance));
+        }
+
+        private void updateSelection(int selection) {
+            if (selection == lastSelection) return;
+            lastSelection = selection;
+            if (pages) {
+                jumpPageLive(selection);
+            } else {
+                if (documentSelector != null)
+                    documentSelector.setText(shortName(documents.get(selection).name) + "  ▾");
+                requestDocumentSwitchLive(selection, false);
+            }
+        }
+
         @Override public boolean onTouch(View view, android.view.MotionEvent event) {
-            if (!ready()) return false;
+            if (!ready() || focusOverlay != null) return false;
             switch (event.getActionMasked()) {
                 case android.view.MotionEvent.ACTION_DOWN:
                     startY = event.getRawY();
                     initial = pages ? pageIndex : activeDocument;
-                    selection = initial;
+                    lastSelection = initial;
                     dragging = false;
                     return true;
                 case android.view.MotionEvent.ACTION_MOVE:
-                    float distance = startY - event.getRawY();
-                    if (Math.abs(distance) > threshold) dragging = true;
+                    if (!dragging && Math.abs(startY - event.getRawY()) > threshold) {
+                        dragging = true;
+                        beginDragPreview(pages, initial);
+                    }
                     if (dragging) {
-                        int max = pages ? pageOrder.size() : documents.size();
-                        selection = Math.max(0, Math.min(max - 1,
-                            initial + Math.round(distance / dp(28))));
-                        if (pages) {
-                            pageSelector.setText((selection + 1) + " / " + pageOrder.size() + " ▾");
-                        } else {
-                            documentSelector.setText(shortName(documents.get(selection).name) + " ▾");
-                        }
+                        if (dragPreviewWheel != null)
+                            dragPreviewWheel.followDrag(progressAt(event.getRawY()));
+                        updateSelection(selectionAt(event.getRawY()));
                     }
                     return true;
                 case android.view.MotionEvent.ACTION_UP:
                     if (dragging) {
-                        if (pages) {
-                            pageIndex = selection;
-                            pdfPages.scrollToPage(selection);
-                            refreshUI();
-                        } else {
-                            switchDocument(selection);
-                        }
-                        // Keep the wheel available for precise corrections.
-                        showWheel(pages);
+                        int selected = selectionAt(event.getRawY());
+                        updateSelection(selected);
+                        closeDragPreviewSoon(selected);
                     } else {
                         view.performClick();
                     }
+                    dragging = false;
                     return true;
                 case android.view.MotionEvent.ACTION_CANCEL:
-                    refreshUI();
+                    if (dragging) {
+                        if (pages) jumpPageLive(initial);
+                        else requestDocumentSwitchLive(initial, true);
+                        dismissDragPreview(true);
+                    }
+                    dragging = false;
                     return true;
             }
             return true;
@@ -602,6 +701,7 @@ public class MainActivity extends Activity {
 
     private void showWheel(boolean pages) {
         if (!ready()) return;
+        dismissDragPreview(false);
         dismissWheel();
 
         ArrayList<String> items = new ArrayList<>();
@@ -863,7 +963,9 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (editOverlay != null) {
+        if (dragPreviewOverlay != null) {
+            dismissDragPreview(true);
+        } else if (editOverlay != null) {
             dismissEditMenu();
         } else if (wheelOverlay != null) {
             dismissWheel();
@@ -1050,8 +1152,7 @@ public class MainActivity extends Activity {
             cancelRequestedDocumentSwitch();
             return;
         }
-        if (requestedDocument == position && pendingDocumentSwitch != null && !immediate)
-            return;
+        if (requestedDocument == position) return;
 
         cancelRequestedDocumentSwitch();
         requestedDocument = position;
@@ -1414,6 +1515,9 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        cancelRequestedDocumentSwitch();
+        dismissDragPreview(false);
+        documentWorker.shutdownNow();
         if (editOverlay != null) {
             editOverlay.animate().cancel();
             host.removeView(editOverlay);
