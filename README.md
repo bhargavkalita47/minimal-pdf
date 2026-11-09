@@ -14,6 +14,11 @@ A minimal offline Android PDF reader and page organizer for personal use. No acc
 - Floating page scrubber: vertical position tracks the document progress and dragging jumps directly to a page
 - Drag directly on the bottom-left document or page label for an in-place, finger-tracking wheel that updates pages live and switches PDFs without blocking the UI thread
 - Tap those labels to open the full picker as before; dragging never opens the picker on release
+- Swipe left/right to navigate one page in both the continuous reader and focused page mode
+- Focus mode retains its overlay and renders the next page in the background with a short cross-slide
+- Pages are separated by only ~2dp of vertical spacing
+- The document and page picker wheels are centered above the bottom bar and use the same vertical alignment
+- The compact page indicator follows fractional scroll progress with frame-rate-independent easing rather than snapping between whole pages
 - The compact right-side page indicator animates between positions and fades when the reader controls hide, reappearing briefly as pages change
 - Normal continuous scrolling no longer supports zoom; pinch and zoom presets are available in focused single-page mode only
 - Import multiple PDFs in one picker action, switch between them, and retain each PDF's in-progress page ordering and reading position across switches

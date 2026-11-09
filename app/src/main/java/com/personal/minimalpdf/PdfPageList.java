@@ -34,6 +34,8 @@ public final class PdfPageList extends RecyclerView {
         void onSingleTap();
         void onDoubleTap(int position);
         void onZoomChanged(float zoom);
+        void onHorizontalSwipe(int position, int direction);
+        void onScrollProgress(float fractionalPage);
     }
 
     private final Object renderLock = new Object();
@@ -67,6 +69,7 @@ public final class PdfPageList extends RecyclerView {
         addOnScrollListener(new OnScrollListener() {
             @Override public void onScrolled(RecyclerView view, int dx, int dy) {
                 notifyVisiblePage();
+                notifyScrollProgress();
             }
             @Override public void onScrollStateChanged(RecyclerView view, int newState) {
                 if (newState == SCROLL_STATE_IDLE) notifyVisiblePage();
@@ -88,6 +91,17 @@ public final class PdfPageList extends RecyclerView {
         if (top != null && first + 1 < adapter.getItemCount() && top.getBottom() < getHeight() / 5)
             first++;
         listener.onVisiblePageChanged(first);
+    }
+
+    private void notifyScrollProgress() {
+        int first = layout.findFirstVisibleItemPosition();
+        if (first == NO_POSITION || adapter.getItemCount() == 0) return;
+        View row = layout.findViewByPosition(first);
+        if (row == null) return;
+        float fractional = Math.max(0f, Math.min(1f,
+            (getPaddingTop() - row.getTop()) / (float)Math.max(1, row.getHeight())));
+        listener.onScrollProgress(Math.min(adapter.getItemCount() - 1f,
+            first + fractional));
     }
 
     public void setDocument(PdfRenderer reader, List<Integer> order) {
@@ -124,6 +138,7 @@ public final class PdfPageList extends RecyclerView {
         stopScroll();
         layout.scrollToPositionWithOffset(index, dp(6));
         listener.onVisiblePageChanged(index);
+        listener.onScrollProgress(index);
     }
 
     public void dispose() {
@@ -194,6 +209,10 @@ public final class PdfPageList extends RecyclerView {
                     int index = holder.getBindingAdapterPosition();
                     if (index != NO_POSITION) listener.onDoubleTap(index);
                 }
+                @Override public void horizontalSwipe(int direction) {
+                    int index = holder.getBindingAdapterPosition();
+                    if (index != NO_POSITION) listener.onHorizontalSwipe(index, direction);
+                }
             });
             return holder;
         }
@@ -231,13 +250,15 @@ public final class PdfPageList extends RecyclerView {
             super(context);
             float density = context.getResources().getDisplayMetrics().density;
             gutterX = (int)(12f * density + .5f);
-            gutterY = (int)(9f * density + .5f);
+            // Only a 1dp margin above and below: adjacent pages nearly touch.
+            gutterY = Math.max(1, (int)(1f * density + .5f));
             paper.setColor(Color.WHITE);
         }
 
         interface TapActions {
             void singleTap();
             void doubleTap();
+            void horizontalSwipe(int direction);
         }
 
         void setTapActions(TapActions callbacks) {
@@ -251,6 +272,20 @@ public final class PdfPageList extends RecyclerView {
                     @Override public boolean onDoubleTap(MotionEvent event) {
                         callbacks.doubleTap();
                         return true;
+                    }
+                    @Override public boolean onFling(MotionEvent first, MotionEvent last,
+                                                      float vx, float vy) {
+                        if (first == null || last == null) return false;
+                        float dx = last.getX() - first.getX();
+                        float dy = last.getY() - first.getY();
+                        float density = getResources().getDisplayMetrics().density;
+                        if (Math.abs(dx) > 68f * density &&
+                            Math.abs(dx) > Math.abs(dy) * 1.35f &&
+                            Math.abs(vx) > 360f * density) {
+                            callbacks.horizontalSwipe(dx < 0 ? 1 : -1);
+                            return true;
+                        }
+                        return false;
                     }
                 });
             setClickable(true);
