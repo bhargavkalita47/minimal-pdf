@@ -1,8 +1,21 @@
-# Minimal PDF
+# Minimal PDF — Offline Android PDF Reader & Page Organiser
 
-Minimal PDF is an offline Android app for reading and organising PDFs. Search selectable text, bookmark pages, reorder a document or extract a page range into a new file. The app works without an account or an internet connection.
+[Download the Android app](https://github.com/bhargavkalita47/minimal-pdf/releases/latest)
 
-[Download the latest Android APK](https://github.com/bhargavkalita47/minimal-pdf/releases/latest) · Android 8.0 or newer
+Minimal PDF is a native Android application for reading, searching and reorganising PDF documents without an account or internet connection. It supports long documents, multiple open files, focused reading and exporting selected pages into a new PDF.
+
+## Product capabilities
+
+- Continuous lazy-rendered reading, zoomed focus mode and gesture-based page navigation.
+- Offline selectable-text search, bookmarks, embedded outlines and recent documents.
+- Multiple open documents with independent reading positions and page ordering.
+- Page removal, reordering, inclusive-range extraction, saving and Android sharing.
+- Content-preserving export through PDFBox rather than rasterising pages.
+- Adaptive launcher icon, animated reading controls and unclipped document viewport.
+
+**Stack:** Native Android · PdfRenderer · PdfBox-Android · AndroidX FileProvider · GitHub Actions
+
+**Distribution:** Android 8.0+; the repository provides an installable debug APK. Image-only scans require OCR, which is not included.
 
 ## Project timeline
 
