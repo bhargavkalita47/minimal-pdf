@@ -2,6 +2,26 @@
 
 A minimal offline Android PDF reader and page organizer for personal use. No accounts, ads, trackers, or internet permissions.
 
+[Download the latest Android APK](https://github.com/bhargavkalita47/minimal-pdf/releases/latest) · Android 8.0 or newer
+
+## Project timeline
+
+| Phase | What changed |
+| --- | --- |
+| [Standalone Android app](https://github.com/bhargavkalita47/minimal-pdf/commit/d70d2153) | Started as an offline viewer that opens local PDFs through Android’s document picker. Added an APK build in GitHub Actions. |
+| [Page editing and sharing](https://github.com/bhargavkalita47/minimal-pdf/commit/1e7e229f) | Added page reordering, removal, inclusive-range extraction, saving a copy and Android sharing. |
+| [Continuous reader](https://github.com/bhargavkalita47/minimal-pdf/commit/a0db3f17) through v1.10 | Moved to lazy vertical rendering, then added page scrubbing, a focused zoom mode and independent reading positions for open PDFs. |
+| v1.11–v1.12 | Added offline text search, bookmarks and recent PDFs. Simplified search to a compact overlay and saving a page to one tap. |
+| v1.13–[v1.15](https://github.com/bhargavkalita47/minimal-pdf/releases/tag/v1.15) | Shipped a custom book icon, corrected clipping at the toolbar edges and smoothed the transition into and out of full-screen reading. |
+
+**Today:** An offline Android PDF reader and page organiser with a downloadable debug APK, persistent reading state and content-preserving page exports.
+
+## Engineering challenges and solutions
+
+- **Editable exports.** Android’s `PdfRenderer` displays pages, while PDFBox imports the original page content for export. This preserves selectable text and vector graphics. AndroidX `FileProvider` shares a temporary copy through a scoped content URI.
+- **Long documents and multiple PDFs.** Pages render lazily as they enter the continuous viewport. Each open document keeps its own page order and reading position so switching files restores its state.
+- **Toolbars obscured pages.** The reader clips to the visible area while the bars are shown. [v1.15](https://github.com/bhargavkalita47/minimal-pdf/commit/30e5c1ad) animates the reading insets with the bars, anchors the first visible page and reverses from the current animation position when tapped repeatedly.
+
 ## Features
 
 - Automatically match the phone's light/dark theme, including when system appearance changes
@@ -22,7 +42,7 @@ A minimal offline Android PDF reader and page organizer for personal use. No acc
 - The compact right-side page indicator animates between positions and fades when the reader controls hide, reappearing briefly as pages change
 - Normal continuous scrolling no longer supports zoom; pinch and zoom presets are available in focused single-page mode only
 - Import multiple PDFs in one picker action, switch between them, and retain each PDF's in-progress page ordering and reading position across switches
-- Fast 165–185 ms hide/show and focused-page transitions that do not resize the reading area
+- Animated reader controls preserve the visible page position when entering and leaving full-screen reading
 - Borderless, simplified page and document controls
 - Scroll vertically through the entire PDF continuously, with pages rendered lazily for memory efficiency
 - Pinch to zoom and pan in **focus mode**. Normal continuous reading remains unzoomed.
@@ -55,7 +75,7 @@ Requires Android 8.0 or newer.
 - Persistent per-document page bookmarks and embedded chapter outline navigation
 - Document manager for reordering and closing open PDFs while preserving their respective reading positions; active document and last-read pages are visible
 - Optional, throttled haptic feedback for selection changes
-- Fixed overlays and near-zero reading padding so hiding the toolbars reveals the complete reading area without content resizing
+- Fixed overlays and near-zero reading padding to maximise the document area
 
 ### Version 1.12 — simpler search and saved pages
 
